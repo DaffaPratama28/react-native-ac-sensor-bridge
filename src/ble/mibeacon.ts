@@ -41,6 +41,21 @@ function bytesToMac(macBytesReversedOrder: Uint8Array): string {
     .join(':');
 }
 
+function macStringToWireOrder(macString: string): Uint8Array {
+  const parts = macString.split(':');
+  if (parts.length !== 6) {
+    throw new MiBeaconParseError(
+      `Invalid MAC string format provided by scanner: ${macString}`,
+    );
+  }
+  const bytes = new Uint8Array(6);
+  // Wire order is reverse of standard display order
+  for (let i = 0; i < 6; i++) {
+    bytes[5 - i] = parseInt(parts[i], 16);
+  }
+  return bytes;
+}
+
 /**
  * Parses the header of a raw MiBeacon service-data payload (the bytes
  * that followed the 0xFE95 UUID in the advertisement, exactly as your
@@ -49,7 +64,10 @@ function bytesToMac(macBytesReversedOrder: Uint8Array): string {
  * Does NOT decrypt — if isEncrypted is true, frame.rawPayload is still
  * ciphertext (+ extCnt + MIC tail); pass it to decrypt.ts next.
  */
-export function parseMiBeaconHeader(serviceData: Uint8Array): MiBeaconFrame {
+export function parseMiBeaconHeader(
+  serviceData: Uint8Array,
+  deviceMac: string,
+): MiBeaconFrame {
   if (serviceData.length < HEADER_MIN_LENGTH) {
     throw new MiBeaconParseError(
       `Service data too short to contain a MiBeacon header: ${serviceData.length} bytes.`,
@@ -68,22 +86,27 @@ export function parseMiBeaconHeader(serviceData: Uint8Array): MiBeaconFrame {
 
   let offset = HEADER_MIN_LENGTH;
 
+  let mac: string;
+  let macBytesWireOrder: Uint8Array;
+
   const hasMacAddress = (frameControl & FRAME_CONTROL_HAS_MAC_ADDRESS) !== 0;
-  if (!hasMacAddress) {
-    // Every MJWSD05MMC advertisement we've seen documented includes the
-    // MAC, but guard anyway rather than reading garbage bytes as a MAC.
-    throw new MiBeaconParseError(
-      'Frame control indicates no MAC address present; cannot parse this frame variant.',
-    );
+
+  if (hasMacAddress) {
+    // Standard broadcast: MAC is included in the payload
+    if (serviceData.length < offset + MAC_LENGTH) {
+      throw new MiBeaconParseError(
+        'Service data too short to contain a MAC address.',
+      );
+    }
+    macBytesWireOrder = serviceData.subarray(offset, offset + MAC_LENGTH);
+    mac = bytesToMac(macBytesWireOrder);
+    offset += MAC_LENGTH;
+  } else {
+    // Threshold broadcast: MAC is omitted to save space for larger sensor data.
+    // We must use the MAC from the BLE scan layer and convert it to wire order for the decryption nonce.
+    mac = deviceMac;
+    macBytesWireOrder = macStringToWireOrder(deviceMac);
   }
-  if (serviceData.length < offset + MAC_LENGTH) {
-    throw new MiBeaconParseError(
-      'Service data too short to contain a MAC address.',
-    );
-  }
-  const macBytes = serviceData.subarray(offset, offset + MAC_LENGTH);
-  const mac = bytesToMac(macBytes);
-  offset += MAC_LENGTH;
 
   const hasCapabilities = (frameControl & FRAME_CONTROL_HAS_CAPABILITIES) !== 0;
   if (hasCapabilities) {
@@ -92,7 +115,6 @@ export function parseMiBeaconHeader(serviceData: Uint8Array): MiBeaconFrame {
         'Service data too short to contain capability bytes.',
       );
     }
-    // Capability byte content isn't needed downstream; skip over it.
     offset += CAPABILITY_LENGTH;
   }
 
@@ -107,7 +129,7 @@ export function parseMiBeaconHeader(serviceData: Uint8Array): MiBeaconFrame {
     isEncrypted,
     rawPayload,
     productIdBytes: serviceData.subarray(2, 4),
-    macBytesWireOrder: macBytes,
+    macBytesWireOrder: macBytesWireOrder,
   };
 }
 
@@ -166,8 +188,11 @@ export function objectsToReading(objects: MiBeaconObject[]): SensorReading {
 
     switch (obj.id) {
       case MiBeaconObjectId.Temperature:
-        if (obj.data.length >= 2) {
-          reading.temperatureC = view.getInt16(0, true) / 10;
+        if (obj.data.length >= 4) {
+          // Parses [0x66, 0x66, 0x02, 0x42] -> 32.60000228881836
+          const rawTemp = view.getFloat32(0, true);
+          // Round to 1 decimal place (32.6) for clean automation logic
+          reading.temperatureC = Math.round(rawTemp * 10) / 10;
         }
         break;
 

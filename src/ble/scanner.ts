@@ -179,7 +179,7 @@ export class MijiaScanner {
 
     try {
       const raw = new Uint8Array(Buffer.from(serviceDataBase64, 'base64'));
-      const frame = parseMiBeaconHeader(raw);
+      const frame = parseMiBeaconHeader(raw, device.id);
 
       console.log(
         'Frame:',

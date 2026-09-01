@@ -46,7 +46,7 @@ export interface SensorReading {
 /** Known MiBeacon object IDs relevant to the Mijia temp/humidity line. */
 export enum MiBeaconObjectId {
   // Classic MiBeacon v5 catalog (LYWSD03MMC-era devices).
-  Temperature = 0x1004,
+  Temperature = 0x4801,
   Humidity = 0x1006,
   Battery = 0x100a,
   TemperatureHumidity = 0x100d,
