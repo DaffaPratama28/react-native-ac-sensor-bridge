@@ -43,10 +43,20 @@ export class MijiaScannerConfigError extends Error {
 export class MijiaScanner {
   private readonly manager: BleManager;
   private readonly targetMac: string;
+  private readonly targetMacWireOrder: Uint8Array;
   private readonly bindkeyHex: string;
   private readonly updateListeners = new Set<SensorUpdateListener>();
   private readonly errorListeners = new Set<ScanErrorListener>();
   private scanning = false;
+  /**
+   * This sensor fragments its broadcasts — a given advertisement carries
+   * only whichever attribute(s) crossed a threshold, not a full bundle.
+   * Merge each new partial reading into the last known state so
+   * consumers of onUpdate always see the most complete picture available,
+   * rather than a reading that's missing fields simply because THIS
+   * particular cycle didn't happen to include them.
+   */
+  private lastKnownReading: SensorReading = {};
 
   constructor() {
     const mac = Config.MIJIA_MAC;
@@ -60,6 +70,12 @@ export class MijiaScanner {
     }
 
     this.targetMac = mac.toUpperCase();
+    this.targetMacWireOrder = Uint8Array.from(
+      this.targetMac
+        .split(':')
+        .map(h => parseInt(h, 16))
+        .reverse(),
+    );
     this.bindkeyHex = bindkey;
     this.manager = new BleManager();
     this.manager.setLogLevel(LogLevel.Warning);
@@ -179,7 +195,14 @@ export class MijiaScanner {
 
     try {
       const raw = new Uint8Array(Buffer.from(serviceDataBase64, 'base64'));
-      const frame = parseMiBeaconHeader(raw, device.id);
+
+      console.log(
+        'Raw serviceData hex (pre-parse):',
+        Buffer.from(raw).toString('hex'),
+        'len=' + raw.length,
+      );
+
+      const frame = parseMiBeaconHeader(raw, this.targetMacWireOrder);
 
       console.log(
         'Frame:',
@@ -220,8 +243,14 @@ export class MijiaScanner {
         return; // This advertisement cycle carried no sensor objects (e.g. a connectable-flag-only frame).
       }
 
+      // Merge into last known state — see field comment on lastKnownReading.
+      this.lastKnownReading = {
+        ...this.lastKnownReading,
+        ...reading,
+      };
+
       this.emitUpdate({
-        reading,
+        reading: this.lastKnownReading,
         mac: frame.mac,
         rssi: device.rssi ?? null,
         timestamp: Date.now(),

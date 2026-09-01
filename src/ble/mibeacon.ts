@@ -41,21 +41,6 @@ function bytesToMac(macBytesReversedOrder: Uint8Array): string {
     .join(':');
 }
 
-function macStringToWireOrder(macString: string): Uint8Array {
-  const parts = macString.split(':');
-  if (parts.length !== 6) {
-    throw new MiBeaconParseError(
-      `Invalid MAC string format provided by scanner: ${macString}`,
-    );
-  }
-  const bytes = new Uint8Array(6);
-  // Wire order is reverse of standard display order
-  for (let i = 0; i < 6; i++) {
-    bytes[5 - i] = parseInt(parts[i], 16);
-  }
-  return bytes;
-}
-
 /**
  * Parses the header of a raw MiBeacon service-data payload (the bytes
  * that followed the 0xFE95 UUID in the advertisement, exactly as your
@@ -63,10 +48,21 @@ function macStringToWireOrder(macString: string): Uint8Array {
  *
  * Does NOT decrypt — if isEncrypted is true, frame.rawPayload is still
  * ciphertext (+ extCnt + MIC tail); pass it to decrypt.ts next.
+ *
+ * @param serviceData         raw bytes after the 0xFE95 UUID.
+ * @param fallbackMacWireOrder 6 bytes, wire order (not display order —
+ *   reverse of the usual "AA:BB:..." string), used ONLY when the frame's
+ *   own frameControl indicates no MAC is present. Confirmed necessary
+ *   for this device: threshold-triggered frames carrying a 4-byte
+ *   float32 object omit the in-frame MAC to stay under the BLE
+ *   advertisement size limit. Pass the MAC you already know from the
+ *   BLE scan result (scanner.ts already has this as targetMac). If
+ *   omitted and the frame lacks a MAC, this still throws, same as
+ *   before.
  */
 export function parseMiBeaconHeader(
   serviceData: Uint8Array,
-  deviceMac: string,
+  fallbackMacWireOrder?: Uint8Array,
 ): MiBeaconFrame {
   if (serviceData.length < HEADER_MIN_LENGTH) {
     throw new MiBeaconParseError(
@@ -86,27 +82,34 @@ export function parseMiBeaconHeader(
 
   let offset = HEADER_MIN_LENGTH;
 
-  let mac: string;
-  let macBytesWireOrder: Uint8Array;
-
   const hasMacAddress = (frameControl & FRAME_CONTROL_HAS_MAC_ADDRESS) !== 0;
 
+  let macBytes: Uint8Array;
+  let macWasFallback: boolean;
+
   if (hasMacAddress) {
-    // Standard broadcast: MAC is included in the payload
     if (serviceData.length < offset + MAC_LENGTH) {
       throw new MiBeaconParseError(
         'Service data too short to contain a MAC address.',
       );
     }
-    macBytesWireOrder = serviceData.subarray(offset, offset + MAC_LENGTH);
-    mac = bytesToMac(macBytesWireOrder);
+    macBytes = serviceData.subarray(offset, offset + MAC_LENGTH);
     offset += MAC_LENGTH;
+    macWasFallback = false;
   } else {
-    // Threshold broadcast: MAC is omitted to save space for larger sensor data.
-    // We must use the MAC from the BLE scan layer and convert it to wire order for the decryption nonce.
-    mac = deviceMac;
-    macBytesWireOrder = macStringToWireOrder(deviceMac);
+    if (!fallbackMacWireOrder || fallbackMacWireOrder.length !== MAC_LENGTH) {
+      throw new MiBeaconParseError(
+        'Frame control indicates no MAC address present, and no valid fallbackMacWireOrder was ' +
+          'supplied to parseMiBeaconHeader(). This frame variant requires the caller to provide ' +
+          'the MAC from the BLE scan result itself.',
+      );
+    }
+    macBytes = fallbackMacWireOrder;
+    macWasFallback = true;
+    // No offset advance — this frame variant doesn't include MAC bytes at all.
   }
+
+  const mac = bytesToMac(macBytes);
 
   const hasCapabilities = (frameControl & FRAME_CONTROL_HAS_CAPABILITIES) !== 0;
   if (hasCapabilities) {
@@ -115,6 +118,7 @@ export function parseMiBeaconHeader(
         'Service data too short to contain capability bytes.',
       );
     }
+    // Capability byte content isn't needed downstream; skip over it.
     offset += CAPABILITY_LENGTH;
   }
 
@@ -129,7 +133,8 @@ export function parseMiBeaconHeader(
     isEncrypted,
     rawPayload,
     productIdBytes: serviceData.subarray(2, 4),
-    macBytesWireOrder: macBytesWireOrder,
+    macBytesWireOrder: macBytes,
+    macWasFallback,
   };
 }
 
@@ -188,11 +193,8 @@ export function objectsToReading(objects: MiBeaconObject[]): SensorReading {
 
     switch (obj.id) {
       case MiBeaconObjectId.Temperature:
-        if (obj.data.length >= 4) {
-          // Parses [0x66, 0x66, 0x02, 0x42] -> 32.60000228881836
-          const rawTemp = view.getFloat32(0, true);
-          // Round to 1 decimal place (32.6) for clean automation logic
-          reading.temperatureC = Math.round(rawTemp * 10) / 10;
+        if (obj.data.length >= 2) {
+          reading.temperatureC = view.getInt16(0, true) / 10;
         }
         break;
 
@@ -212,6 +214,15 @@ export function objectsToReading(objects: MiBeaconObject[]): SensorReading {
       case MiBeaconObjectId.Battery:
         if (obj.data.length >= 1) {
           reading.batteryPercent = view.getUint8(0);
+        }
+        break;
+
+      case MiBeaconObjectId.TemperatureV2:
+        // 4-byte IEEE-754 float32, confirmed via direct decrypt-and-verify
+        // test on a real captured frame. Unlike every other object on
+        // this device, this is NOT an unscaled/scaled integer byte.
+        if (obj.data.length >= 4) {
+          reading.temperatureC = Math.round(view.getFloat32(0, true) * 10) / 10;
         }
         break;
 
