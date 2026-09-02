@@ -23,7 +23,7 @@ export interface MiBeaconFrame {
   frameControl: number;
   productId: number;
   frameCounter: number;
-  /** MAC in normal display order (already reversed from wire order), e.g. "A4:C1:38:B7:58:9A" */
+  /** MAC in normal display order (already reversed from wire order), e.g. "AA:BB:CC:DD:EE:FF" */
   mac: string;
   isEncrypted: boolean;
   /** Raw product id bytes as transmitted (little-endian), needed verbatim for nonce/AAD construction in decrypt.ts. */

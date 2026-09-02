@@ -17,7 +17,10 @@ import { SensorReading } from '../types/mibeacon';
 const MIBEACON_SERVICE_UUID = '0000fe95-0000-1000-8000-00805f9b34fb';
 
 export interface SensorUpdate {
+  /** Merged with last-known values — use this for live display. */
   reading: SensorReading;
+  /** ONLY what this specific advertisement cycle reported (may have some fields undefined) — use this for storage/history so 'EMPTY' means what it says. */
+  rawReading: SensorReading;
   mac: string;
   rssi: number | null;
   timestamp: number;
@@ -233,12 +236,12 @@ export class MijiaScanner {
         })),
       );
 
-      const reading = objectsToReading(objects);
+      const rawReading = objectsToReading(objects);
 
       if (
-        reading.temperatureC === undefined &&
-        reading.humidityPercent === undefined &&
-        reading.batteryPercent === undefined
+        rawReading.temperatureC === undefined &&
+        rawReading.humidityPercent === undefined &&
+        rawReading.batteryPercent === undefined
       ) {
         return; // This advertisement cycle carried no sensor objects (e.g. a connectable-flag-only frame).
       }
@@ -246,11 +249,12 @@ export class MijiaScanner {
       // Merge into last known state — see field comment on lastKnownReading.
       this.lastKnownReading = {
         ...this.lastKnownReading,
-        ...reading,
+        ...rawReading,
       };
 
       this.emitUpdate({
         reading: this.lastKnownReading,
+        rawReading,
         mac: frame.mac,
         rssi: device.rssi ?? null,
         timestamp: Date.now(),
