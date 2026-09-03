@@ -1,5 +1,4 @@
-import { PermissionsAndroid, Platform } from 'react-native';
-import { BleManager, Device, LogLevel } from 'react-native-ble-plx';
+import { NativeEventEmitter, NativeModules, PermissionsAndroid, Platform } from 'react-native';
 import Config from 'react-native-config';
 
 import {
@@ -10,11 +9,6 @@ import {
 } from './mibeacon';
 import { decryptMiBeaconPayload, MiBeaconDecryptError } from './decrypt';
 import { SensorReading } from '../types/mibeacon';
-
-// 16-bit MiBeacon service UUID (0xFE95), expanded to the full 128-bit
-// form using the Bluetooth SIG base UUID. react-native-ble-plx scan
-// filters expect fully-qualified UUID strings.
-const MIBEACON_SERVICE_UUID = '0000fe95-0000-1000-8000-00805f9b34fb';
 
 export interface SensorUpdate {
   /** Merged with last-known values — use this for live display. */
@@ -36,21 +30,62 @@ export class MijiaScannerConfigError extends Error {
   }
 }
 
+interface BleScannerNativeModule {
+  startScan(macAddress: string): Promise<void>;
+  stopScan(): Promise<void>;
+}
+
+interface NativeScanResultEvent {
+  mac: string;
+  name: string | null;
+  serviceDataBase64: string;
+  rssi: number;
+  timestamp: number;
+}
+
+const EVENT_SCAN_RESULT = 'BleScannerModule:scanResult';
+const EVENT_SCAN_ERROR = 'BleScannerModule:scanError';
+
+const LINKING_ERROR =
+  `BleScannerModule native module is not linked. Make sure:\n` +
+  `  - You have rebuilt the app after adding BleScannerPackage (JS-only reload is not enough)\n` +
+  `  - BleScannerPackage is registered in MainApplication\n` +
+  `  - You are running on Android (this module has no iOS implementation)\n`;
+
+function getNativeModule(): BleScannerNativeModule {
+  const nativeModule = NativeModules.BleScannerModule as BleScannerNativeModule | undefined;
+  if (!nativeModule) {
+    throw new Error(LINKING_ERROR);
+  }
+  return nativeModule;
+}
+
 /**
  * Passive BLE scanner for a single Xiaomi Mijia-family sensor. Never
  * calls .connect() — reads and decrypts service-data advertisements
- * only, per project spec (the Mijia 3 drops active GATT sessions
- * quickly, and passive scanning is what needs to survive indefinitely
- * in the foreground service).
+ * only, per project spec.
+ *
+ * Scanning itself is delegated to the native BleScannerModule (a
+ * hardware-level device-address ScanFilter via Android's
+ * BluetoothLeScanner), NOT react-native-ble-plx. This project found
+ * that unfiltered scans (and this hardware's service-UUID filter) both
+ * stop receiving results ~30s after screen-off — documented Android
+ * behavior independent of Doze/battery-optimization. A native MAC
+ * ScanFilter is the fix; see BleScannerModule.java for details. This
+ * class's public API is unchanged so callers (App.tsx) don't need to
+ * change anything.
  */
 export class MijiaScanner {
-  private readonly manager: BleManager;
   private readonly targetMac: string;
   private readonly targetMacWireOrder: Uint8Array;
   private readonly bindkeyHex: string;
   private readonly updateListeners = new Set<SensorUpdateListener>();
   private readonly errorListeners = new Set<ScanErrorListener>();
+  private readonly eventEmitter: NativeEventEmitter;
+  private scanResultSubscription: { remove: () => void } | null = null;
+  private scanErrorSubscription: { remove: () => void } | null = null;
   private scanning = false;
+
   /**
    * This sensor fragments its broadcasts — a given advertisement carries
    * only whichever attribute(s) crossed a threshold, not a full bundle.
@@ -76,12 +111,16 @@ export class MijiaScanner {
     this.targetMacWireOrder = Uint8Array.from(
       this.targetMac
         .split(':')
-        .map(h => parseInt(h, 16))
+        .map((h) => parseInt(h, 16))
         .reverse(),
     );
     this.bindkeyHex = bindkey;
-    this.manager = new BleManager();
-    this.manager.setLogLevel(LogLevel.Warning);
+
+    // NativeModules.BleScannerModule is required here (not optional) —
+    // NativeEventEmitter needs the module reference for iOS-style
+    // addListener/removeListeners methods; Android ignores those but the
+    // constructor still expects a non-null module.
+    this.eventEmitter = new NativeEventEmitter(NativeModules.BleScannerModule);
   }
 
   /**
@@ -89,13 +128,6 @@ export class MijiaScanner {
    * requirements differ across Android versions — call this before
    * start() and handle a false return by surfacing a clear message to
    * the user rather than silently failing to find devices.
-   *
-   * NOTE: whether BLUETOOTH_SCAN can be requested with the
-   * neverForLocation flag (skipping the location permission entirely on
-   * API 31+) depends on your manifest declaration — that's still an
-   * open decision in this project. This function currently requests
-   * location as well to be safe on all API levels; revisit once that's
-   * decided and reflected in AndroidManifest.xml.
    */
   async requestPermissions(): Promise<boolean> {
     if (Platform.OS !== 'android') {
@@ -136,74 +168,73 @@ export class MijiaScanner {
     return () => this.errorListeners.delete(listener);
   }
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.scanning) {
       return;
     }
     this.scanning = true;
 
-    // TEMPORARY DIAGNOSTIC: scanning with no service UUID filter (null)
-    // instead of [MIBEACON_SERVICE_UUID], to rule out a native scan-filter
-    // issue. This will pick up every BLE device in range, not just the
-    // Mijia sensor — expect a lot of "Saw device" log noise. Revert to
-    // the filtered array once we've confirmed devices show up at all.
-    this.manager.startDeviceScan(
-      null,
-      { allowDuplicates: true },
-      (error, device) => {
-        if (error) {
-          this.emitError(new Error(`BLE scan error: ${error.message}`));
-          return;
-        }
-        if (device) {
-          this.handleDevice(device);
-        }
+    this.scanResultSubscription = this.eventEmitter.addListener(
+      EVENT_SCAN_RESULT,
+      (event: NativeScanResultEvent) => this.handleScanResult(event),
+    );
+    this.scanErrorSubscription = this.eventEmitter.addListener(
+      EVENT_SCAN_ERROR,
+      (event: { errorCode: number }) => {
+        this.emitError(new Error(`Native BLE scan error, code ${event.errorCode}`));
       },
     );
+
+    try {
+      await getNativeModule().startScan(this.targetMac);
+    } catch (error) {
+      this.scanning = false;
+      this.scanResultSubscription?.remove();
+      this.scanErrorSubscription?.remove();
+      this.emitError(
+        new Error(`Failed to start native BLE scan: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (!this.scanning) {
       return;
     }
-    this.manager.stopDeviceScan();
     this.scanning = false;
-  }
 
-  /** Call when the app/service is fully shutting down, not on routine stop/start cycles. */
-  destroy(): void {
-    this.stop();
-    this.manager.destroy();
-  }
+    this.scanResultSubscription?.remove();
+    this.scanErrorSubscription?.remove();
+    this.scanResultSubscription = null;
+    this.scanErrorSubscription = null;
 
-  private handleDevice(device: Device): void {
-    const mac = device.id.toUpperCase();
-    if (mac !== this.targetMac) {
-      return; // Ignore other MiBeacon-broadcasting devices in range — filtered
-      // client-side here rather than via startDeviceScan's serviceUUIDs
-      // filter, which proved unreliable on this hardware (see project notes).
+    try {
+      await getNativeModule().stopScan();
+    } catch (error) {
+      this.emitError(
+        new Error(`Failed to stop native BLE scan: ${error instanceof Error ? error.message : String(error)}`),
+      );
     }
+  }
 
-    console.log(
-      'Saw target sensor:',
-      device.id,
-      device.name,
-      Object.keys(device.serviceData ?? {}),
-    );
+  /** Kept for API compatibility with earlier callers — native module has no persistent handle to tear down, so this is equivalent to stop(). */
+  async destroy(): Promise<void> {
+    await this.stop();
+  }
 
-    const serviceDataBase64 = device.serviceData?.[MIBEACON_SERVICE_UUID];
-    if (!serviceDataBase64) {
-      return; // Advertisement didn't include service data on this cycle.
+  private handleScanResult(event: NativeScanResultEvent): void {
+    // Native module already filters by MAC via hardware ScanFilter, but
+    // double-check defensively — cheap, and guards against any future
+    // change to the native side forgetting the filter.
+    const mac = event.mac.toUpperCase();
+    if (mac !== this.targetMac) {
+      return;
     }
 
     try {
-      const raw = new Uint8Array(Buffer.from(serviceDataBase64, 'base64'));
+      const raw = new Uint8Array(Buffer.from(event.serviceDataBase64, 'base64'));
 
-      console.log(
-        'Raw serviceData hex (pre-parse):',
-        Buffer.from(raw).toString('hex'),
-        'len=' + raw.length,
-      );
+      console.log('Raw serviceData hex (pre-parse):', Buffer.from(raw).toString('hex'), 'len=' + raw.length);
 
       const frame = parseMiBeaconHeader(raw, this.targetMacWireOrder);
 
@@ -229,7 +260,7 @@ export class MijiaScanner {
 
       console.log(
         'Decrypted objects:',
-        objects.map(o => ({
+        objects.map((o) => ({
           id: '0x' + o.id.toString(16).padStart(4, '0'),
           length: o.data.length,
           hex: Buffer.from(o.data).toString('hex'),
@@ -256,14 +287,11 @@ export class MijiaScanner {
         reading: this.lastKnownReading,
         rawReading,
         mac: frame.mac,
-        rssi: device.rssi ?? null,
+        rssi: event.rssi ?? null,
         timestamp: Date.now(),
       });
     } catch (error) {
-      if (
-        error instanceof MiBeaconParseError ||
-        error instanceof MiBeaconDecryptError
-      ) {
+      if (error instanceof MiBeaconParseError || error instanceof MiBeaconDecryptError) {
         this.emitError(error);
       } else {
         this.emitError(
@@ -287,9 +315,5 @@ export class MijiaScanner {
     for (const listener of this.errorListeners) {
       listener(error);
     }
-  }
-
-  async getBluetoothState(): Promise<string> {
-    return this.manager.state();
   }
 }

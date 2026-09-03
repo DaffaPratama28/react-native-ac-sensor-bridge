@@ -3,10 +3,7 @@ import { View, Text, Pressable, StyleSheet, StatusBar } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { MijiaScanner } from './src/ble/scanner';
-import {
-  startForegroundMonitoring,
-  stopForegroundMonitoring,
-} from './src/service/foregroundService';
+import { startForegroundMonitoring, stopForegroundMonitoring } from './src/service/foregroundService';
 import { appendReading } from './src/storage/readingsStore';
 import { LogView } from './src/ui/LogView';
 import { ReadingsHistoryModal } from './src/ui/ReadingsHistoryModal';
@@ -26,38 +23,28 @@ function AppContent() {
   const [scanning, setScanning] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [lastTemp, setLastTemp] = useState<number | undefined>(undefined);
-  const [lastHumidity, setLastHumidity] = useState<number | undefined>(
-    undefined,
-  );
+  const [lastHumidity, setLastHumidity] = useState<number | undefined>(undefined);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [historyVisible, setHistoryVisible] = useState(false);
 
-  const elapsedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
-    null,
-  );
+  const elapsedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scanStartRef = useRef<number>(0);
 
   const pushLog = (line: string) => {
-    setLogLines(prev => {
+    setLogLines((prev) => {
       const next = [...prev, line];
-      return next.length > MAX_LOG_LINES
-        ? next.slice(next.length - MAX_LOG_LINES)
-        : next;
+      return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
     });
   };
 
   useEffect(() => {
-    const unsubUpdate = scanner.onUpdate(u => {
+    const unsubUpdate = scanner.onUpdate((u) => {
       setLastTemp(u.reading.temperatureC);
       setLastHumidity(u.reading.humidityPercent);
 
       pushLog(
-        `${new Date(u.timestamp).toLocaleTimeString()} temp=${
-          u.reading.temperatureC ?? '-'
-        } ` +
-          `hum=${u.reading.humidityPercent ?? '-'} batt=${
-            u.reading.batteryPercent ?? '-'
-          }`,
+        `${new Date(u.timestamp).toLocaleTimeString()} temp=${u.reading.temperatureC ?? '-'} ` +
+          `hum=${u.reading.humidityPercent ?? '-'} batt=${u.reading.batteryPercent ?? '-'}`,
       );
 
       // Store the RAW per-cycle reading (not the merged one) so history
@@ -67,10 +54,10 @@ function AppContent() {
         timestamp: u.timestamp,
         mac: u.mac,
         reading: u.rawReading,
-      }).catch(e => pushLog(`ERROR: failed to store reading: ${e.message}`));
+      }).catch((e) => pushLog(`ERROR: failed to store reading: ${e.message}`));
     });
 
-    const unsubError = scanner.onError(e => {
+    const unsubError = scanner.onError((e) => {
       pushLog(`ERROR: ${e.message}`);
     });
 
@@ -88,7 +75,7 @@ function AppContent() {
       return;
     }
 
-    scanner.start();
+    await scanner.start();
     await startForegroundMonitoring();
 
     scanStartRef.current = Date.now();
@@ -102,7 +89,7 @@ function AppContent() {
   };
 
   const handleStop = async () => {
-    scanner.stop();
+    await scanner.stop();
     await stopForegroundMonitoring(); // Also removes the persistent notification — see MijiaForegroundService.onDestroy().
 
     if (elapsedIntervalRef.current) {
@@ -118,54 +105,33 @@ function AppContent() {
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.header}>
         <Text style={styles.title}>IR Home Bridge</Text>
-        <View
-          style={[
-            styles.statusDot,
-            scanning ? styles.statusDotOn : styles.statusDotOff,
-          ]}
-        />
+        <View style={[styles.statusDot, scanning ? styles.statusDotOn : styles.statusDotOff]} />
       </View>
 
       <View style={styles.readingCard}>
         <View style={styles.readingItem}>
           <Text style={styles.readingLabel}>Temperature</Text>
-          <Text style={styles.readingValue}>
-            {lastTemp !== undefined ? `${lastTemp}°C` : '—'}
-          </Text>
+          <Text style={styles.readingValue}>{lastTemp !== undefined ? `${lastTemp}°C` : '—'}</Text>
         </View>
         <View style={styles.readingDivider} />
         <View style={styles.readingItem}>
           <Text style={styles.readingLabel}>Humidity</Text>
-          <Text style={styles.readingValue}>
-            {lastHumidity !== undefined ? `${lastHumidity}%` : '—'}
-          </Text>
+          <Text style={styles.readingValue}>{lastHumidity !== undefined ? `${lastHumidity}%` : '—'}</Text>
         </View>
       </View>
 
-      {scanning && (
-        <Text style={styles.elapsed}>
-          Running for {formatElapsed(elapsedSeconds)}
-        </Text>
-      )}
+      {scanning && <Text style={styles.elapsed}>Running for {formatElapsed(elapsedSeconds)}</Text>}
 
       <View style={styles.buttonRow}>
         <Pressable
-          style={[
-            styles.button,
-            styles.buttonPrimary,
-            scanning && styles.buttonDisabled,
-          ]}
+          style={[styles.button, styles.buttonPrimary, scanning && styles.buttonDisabled]}
           onPress={handleStart}
           disabled={scanning}
         >
           <Text style={styles.buttonText}>Start Scan</Text>
         </Pressable>
         <Pressable
-          style={[
-            styles.button,
-            styles.buttonSecondary,
-            !scanning && styles.buttonDisabled,
-          ]}
+          style={[styles.button, styles.buttonSecondary, !scanning && styles.buttonDisabled]}
           onPress={handleStop}
           disabled={!scanning}
         >
@@ -173,20 +139,14 @@ function AppContent() {
         </Pressable>
       </View>
 
-      <Pressable
-        style={styles.historyLink}
-        onPress={() => setHistoryVisible(true)}
-      >
+      <Pressable style={styles.historyLink} onPress={() => setHistoryVisible(true)}>
         <Text style={styles.historyLinkText}>View stored readings history</Text>
       </Pressable>
 
       <Text style={styles.logHeading}>Debug log</Text>
       <LogView lines={logLines} />
 
-      <ReadingsHistoryModal
-        visible={historyVisible}
-        onClose={() => setHistoryVisible(false)}
-      />
+      <ReadingsHistoryModal visible={historyVisible} onClose={() => setHistoryVisible(false)} />
     </SafeAreaView>
   );
 }

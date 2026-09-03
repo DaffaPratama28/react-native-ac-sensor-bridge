@@ -9,6 +9,7 @@ import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 
 import com.irhomebridge.ir.IRBlasterPackage
 import com.irhomebridge.service.ForegroundServicePackage
+import com.irhomebridge.ble.BleScannerPackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -20,6 +21,7 @@ class MainApplication : Application(), ReactApplication {
           // Packages that cannot be autolinked yet are added manually here.
           add(IRBlasterPackage())
           add(ForegroundServicePackage())
+          add(BleScannerPackage())
         },
     )
   }
