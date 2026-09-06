@@ -5,14 +5,22 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
+
+import android.app.admin.DevicePolicyManager;
+import android.content.ComponentName;
+import android.os.Handler;
+import android.os.Looper;
 
 /**
  * True Android foreground service, per project spec — NOT a JS-library
@@ -37,6 +45,7 @@ import androidx.core.app.NotificationCompat;
  */
 public class MijiaForegroundService extends Service {
 
+    private static final String TAG = "MijiaForegroundService"; // filter logcat with: adb logcat -s MijiaForegroundService:D BleScannerModule:D
     private static final String CHANNEL_ID = "irhomebridge_monitoring";
     private static final String CHANNEL_NAME = "IR Home Bridge Monitoring";
     private static final int NOTIFICATION_ID = 1001;
@@ -50,11 +59,38 @@ public class MijiaForegroundService extends Service {
     @Nullable
     private PowerManager.WakeLock wakeLock;
 
+
+    /**
+     * DIAGNOSTIC ONLY (2026-09 HyperOS screen-off throttle investigation):
+     * logs the exact wall-clock instant the screen turns off/on, so it can
+     * be cross-referenced against BleScannerModule's RESTART/onScanResult
+     * log lines (same adb logcat capture, both tags) to get a precise
+     * "elapsed ms from screen-off to last successful result" number
+     * instead of eyeballing it from ~16s restart-window counts. Registered
+     * dynamically (ACTION_SCREEN_ON/OFF cannot be caught via a manifest
+     * receiver on API 26+) and tied to this service's lifecycle, since
+     * it's already the longest-lived component here.
+     */
+    private final BroadcastReceiver screenStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            long now = System.currentTimeMillis();
+            if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                Log.d(TAG, "SCREEN_OFF at " + now);
+            } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                Log.d(TAG, "SCREEN_ON at " + now);
+            }
+        }
+    };
+    private boolean screenStateReceiverRegistered = false;
+
     @Override
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
         acquireWakeLock();
+        registerScreenStateReceiver();
     }
 
     @Override
@@ -88,6 +124,7 @@ public class MijiaForegroundService extends Service {
             stopForeground(true);
         }
         releaseWakeLock();
+        unregisterScreenStateReceiver();
         super.onDestroy();
     }
 
@@ -118,6 +155,29 @@ public class MijiaForegroundService extends Service {
             wakeLock.release();
         }
         wakeLock = null;
+    }
+
+    private void registerScreenStateReceiver() {
+        if (screenStateReceiverRegistered) {
+            return;
+        }
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        registerReceiver(screenStateReceiver, filter);
+        screenStateReceiverRegistered = true;
+    }
+
+    private void unregisterScreenStateReceiver() {
+        if (!screenStateReceiverRegistered) {
+            return;
+        }
+        try {
+            unregisterReceiver(screenStateReceiver);
+        } catch (IllegalArgumentException ignored) {
+            // Already unregistered — safe to ignore.
+        }
+        screenStateReceiverRegistered = false;
     }
 
     private void createNotificationChannel() {

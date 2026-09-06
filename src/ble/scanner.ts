@@ -1,4 +1,9 @@
-import { NativeEventEmitter, NativeModules, PermissionsAndroid, Platform } from 'react-native';
+import {
+  NativeEventEmitter,
+  NativeModules,
+  PermissionsAndroid,
+  Platform,
+} from 'react-native';
 import Config from 'react-native-config';
 
 import {
@@ -43,8 +48,23 @@ interface NativeScanResultEvent {
   timestamp: number;
 }
 
+interface NativeScanRestartEvent {
+  restartCount: number;
+  reason: string;
+  timestamp: number;
+}
+
+export interface ScanRestartInfo {
+  restartCount: number;
+  reason: string;
+  timestamp: number;
+}
+
+export type ScanRestartListener = (info: ScanRestartInfo) => void;
+
 const EVENT_SCAN_RESULT = 'BleScannerModule:scanResult';
 const EVENT_SCAN_ERROR = 'BleScannerModule:scanError';
+const EVENT_SCAN_RESTART = 'BleScannerModule:scanRestart';
 
 const LINKING_ERROR =
   `BleScannerModule native module is not linked. Make sure:\n` +
@@ -53,7 +73,9 @@ const LINKING_ERROR =
   `  - You are running on Android (this module has no iOS implementation)\n`;
 
 function getNativeModule(): BleScannerNativeModule {
-  const nativeModule = NativeModules.BleScannerModule as BleScannerNativeModule | undefined;
+  const nativeModule = NativeModules.BleScannerModule as
+    | BleScannerNativeModule
+    | undefined;
   if (!nativeModule) {
     throw new Error(LINKING_ERROR);
   }
@@ -86,6 +108,9 @@ export class MijiaScanner {
   private scanErrorSubscription: { remove: () => void } | null = null;
   private scanning = false;
 
+  private readonly restartListeners = new Set<ScanRestartListener>();
+  private scanRestartSubscription: { remove: () => void } | null = null;
+
   /**
    * This sensor fragments its broadcasts — a given advertisement carries
    * only whichever attribute(s) crossed a threshold, not a full bundle.
@@ -111,7 +136,7 @@ export class MijiaScanner {
     this.targetMacWireOrder = Uint8Array.from(
       this.targetMac
         .split(':')
-        .map((h) => parseInt(h, 16))
+        .map(h => parseInt(h, 16))
         .reverse(),
     );
     this.bindkeyHex = bindkey;
@@ -168,6 +193,19 @@ export class MijiaScanner {
     return () => this.errorListeners.delete(listener);
   }
 
+  /**
+   * Subscribe to native proactive scan-restart events — fires each time
+   * the native module tears down and recreates the scan session to dodge
+   * the HyperOS screen-off long-scan throttle (see BleScannerModule.java).
+   * Purely diagnostic; the automation/BLE pipeline doesn't need to react
+   * to this, it's for verifying the countermeasure is actually running.
+   * Returns an unsubscribe function.
+   */
+  onRestart(listener: ScanRestartListener): () => void {
+    this.restartListeners.add(listener);
+    return () => this.restartListeners.delete(listener);
+  }
+
   async start(): Promise<void> {
     if (this.scanning) {
       return;
@@ -181,7 +219,18 @@ export class MijiaScanner {
     this.scanErrorSubscription = this.eventEmitter.addListener(
       EVENT_SCAN_ERROR,
       (event: { errorCode: number }) => {
-        this.emitError(new Error(`Native BLE scan error, code ${event.errorCode}`));
+        this.emitError(
+          new Error(`Native BLE scan error, code ${event.errorCode}`),
+        );
+      },
+    );
+
+    this.scanRestartSubscription = this.eventEmitter.addListener(
+      EVENT_SCAN_RESTART,
+      (event: NativeScanRestartEvent) => {
+        for (const listener of this.restartListeners) {
+          listener(event);
+        }
       },
     );
 
@@ -191,8 +240,15 @@ export class MijiaScanner {
       this.scanning = false;
       this.scanResultSubscription?.remove();
       this.scanErrorSubscription?.remove();
+
+      this.scanRestartSubscription?.remove();
+      this.scanRestartSubscription = null;
       this.emitError(
-        new Error(`Failed to start native BLE scan: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to start native BLE scan: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        ),
       );
     }
   }
@@ -212,7 +268,11 @@ export class MijiaScanner {
       await getNativeModule().stopScan();
     } catch (error) {
       this.emitError(
-        new Error(`Failed to stop native BLE scan: ${error instanceof Error ? error.message : String(error)}`),
+        new Error(
+          `Failed to stop native BLE scan: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        ),
       );
     }
   }
@@ -232,9 +292,15 @@ export class MijiaScanner {
     }
 
     try {
-      const raw = new Uint8Array(Buffer.from(event.serviceDataBase64, 'base64'));
+      const raw = new Uint8Array(
+        Buffer.from(event.serviceDataBase64, 'base64'),
+      );
 
-      console.log('Raw serviceData hex (pre-parse):', Buffer.from(raw).toString('hex'), 'len=' + raw.length);
+      console.log(
+        'Raw serviceData hex (pre-parse):',
+        Buffer.from(raw).toString('hex'),
+        'len=' + raw.length,
+      );
 
       const frame = parseMiBeaconHeader(raw, this.targetMacWireOrder);
 
@@ -260,7 +326,7 @@ export class MijiaScanner {
 
       console.log(
         'Decrypted objects:',
-        objects.map((o) => ({
+        objects.map(o => ({
           id: '0x' + o.id.toString(16).padStart(4, '0'),
           length: o.data.length,
           hex: Buffer.from(o.data).toString('hex'),
@@ -291,7 +357,10 @@ export class MijiaScanner {
         timestamp: Date.now(),
       });
     } catch (error) {
-      if (error instanceof MiBeaconParseError || error instanceof MiBeaconDecryptError) {
+      if (
+        error instanceof MiBeaconParseError ||
+        error instanceof MiBeaconDecryptError
+      ) {
         this.emitError(error);
       } else {
         this.emitError(
