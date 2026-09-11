@@ -35,6 +35,11 @@ export class MijiaScannerConfigError extends Error {
   }
 }
 
+/** Hard cap on a single scan session — auto-stops even if the user never taps Stop. */
+export const MAX_SCAN_DURATION_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+export type AutoStopListener = () => void;
+
 interface BleScannerNativeModule {
   startScan(macAddress: string): Promise<void>;
   stopScan(): Promise<void>;
@@ -110,6 +115,15 @@ export class MijiaScanner {
 
   private readonly restartListeners = new Set<ScanRestartListener>();
   private scanRestartSubscription: { remove: () => void } | null = null;
+
+  private readonly autoStopListeners = new Set<AutoStopListener>();
+  private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
+  private _scanStartedAt: number | null = null;
+
+  /** Wall-clock time start() last began scanning, or null if not currently scanning. */
+  get scanStartedAt(): number | null {
+    return this._scanStartedAt;
+  }
 
   /**
    * This sensor fragments its broadcasts — a given advertisement carries
@@ -193,6 +207,12 @@ export class MijiaScanner {
     return () => this.errorListeners.delete(listener);
   }
 
+  /** Fires when the 6-hour cap auto-stops the scan (not on a manual stop()). */
+  onAutoStop(listener: AutoStopListener): () => void {
+    this.autoStopListeners.add(listener);
+    return () => this.autoStopListeners.delete(listener);
+  }
+
   /**
    * Subscribe to native proactive scan-restart events — fires each time
    * the native module tears down and recreates the scan session to dodge
@@ -211,6 +231,13 @@ export class MijiaScanner {
       return;
     }
     this.scanning = true;
+
+    this._scanStartedAt = Date.now();
+    this.maxDurationTimer = setTimeout(() => {
+      this.stop().then(() => {
+        for (const listener of this.autoStopListeners) listener();
+      });
+    }, MAX_SCAN_DURATION_MS);
 
     this.scanResultSubscription = this.eventEmitter.addListener(
       EVENT_SCAN_RESULT,
@@ -258,6 +285,12 @@ export class MijiaScanner {
       return;
     }
     this.scanning = false;
+
+    this._scanStartedAt = null;
+    if (this.maxDurationTimer) {
+      clearTimeout(this.maxDurationTimer);
+      this.maxDurationTimer = null;
+    }
 
     this.scanResultSubscription?.remove();
     this.scanErrorSubscription?.remove();

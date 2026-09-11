@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, StatusBar } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import { MijiaScanner } from './src/ble/scanner';
 import {
   startForegroundMonitoring,
   stopForegroundMonitoring,
@@ -13,7 +12,14 @@ import { ReadingsHistoryModal } from './src/ui/ReadingsHistoryModal';
 
 import { RemoteControlScreen } from './src/ui/RemoteControlScreen';
 
-const scanner = new MijiaScanner();
+import { scanner } from './src/ble/sharedScanner';
+
+import { automationController } from './src/automation/automationController';
+import { startBackgroundTicker } from './src/automation/backgroundTicker';
+
+automationController.loadPersisted().catch(() => {});
+startBackgroundTicker();
+
 const MAX_LOG_LINES = 200;
 
 function formatElapsed(totalSeconds: number): string {
