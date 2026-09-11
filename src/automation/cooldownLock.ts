@@ -22,6 +22,12 @@ export class CooldownLock {
     this.lastTransitionAt = now;
   }
 
+  /** ms remaining before canTransition() would return true. 0 if already allowed. */
+  msUntilTransitionAllowed(now: number = Date.now()): number {
+    const elapsed = now - this.lastTransitionAt;
+    return Math.max(0, this.minIntervalMs - elapsed);
+  }
+
   reset(): void {
     this.lastTransitionAt = 0;
   }

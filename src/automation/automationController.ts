@@ -16,6 +16,7 @@ const ENABLED_KEY = 'irhomebridge:automation_enabled';
 
 export type AutomationEvent =
   | { type: 'applied'; action: Partial<HaierYrw02State>; zone: Zone }
+  | { type: 'blocked'; wouldEnterZone: Zone; remainingMs: number }
   | { type: 'error'; message: string };
 
 export type AutomationEventListener = (event: AutomationEvent) => void;
@@ -92,6 +93,10 @@ class AutomationController {
     return () => this.listeners.delete(listener);
   }
 
+  getCooldownRemainingMs(now: number = Date.now()): number {
+    return this.engine?.getCooldownRemainingMs(now) ?? 0;
+  }
+
   private subscribeToScanner(): void {
     this.unsubscribeFromScanner();
     if (!this.engine) return;
@@ -103,16 +108,30 @@ class AutomationController {
         temperatureC: update.reading.temperatureC,
         humidityPercent: update.reading.humidityPercent,
       };
-      const action = this.engine.evaluate(snapshot);
-      if (!action) return;
+      const result = this.engine.evaluate(snapshot);
+
+      if (result.status === 'no_change') return;
+
+      if (result.status === 'blocked_cooldown') {
+        this.emit({
+          type: 'blocked',
+          wouldEnterZone: result.wouldEnterZone,
+          remainingMs: result.remainingMs,
+        });
+        return;
+      }
 
       try {
         const current = await loadAcState();
-        const next: HaierYrw02State = { ...current, ...action };
+        const next: HaierYrw02State = { ...current, ...result.action };
         const { frequency, pattern } = stateToCommand(next);
         await transmit(frequency, pattern);
         await saveAcState(next, 'automation');
-        this.emit({ type: 'applied', action, zone: this.engine.getZone() });
+        this.emit({
+          type: 'applied',
+          action: result.action,
+          zone: result.zone,
+        });
       } catch (error) {
         this.emit({
           type: 'error',

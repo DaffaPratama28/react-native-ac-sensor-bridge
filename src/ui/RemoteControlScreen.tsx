@@ -101,6 +101,8 @@ export function RemoteControlScreen({ onClose }: Props) {
 
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
+
   useEffect(() => {
     loadAcState().then(stored => {
       const { lastUpdated, lastSource, ...state } = stored;
@@ -147,6 +149,14 @@ export function RemoteControlScreen({ onClose }: Props) {
           const { lastUpdated, lastSource, ...state } = stored;
           setAcState(state);
         });
+      } else if (event.type === 'blocked') {
+        setAutomationEvent(
+          `Blocked by cooldown — would switch to "${
+            event.wouldEnterZone
+          }" zone, but must wait ${Math.ceil(
+            event.remainingMs / 1000,
+          )}s more (protects the AC from rapid switching).`,
+        );
       } else {
         setAutomationEvent(`Automation error: ${event.message}`);
       }
@@ -154,6 +164,7 @@ export function RemoteControlScreen({ onClose }: Props) {
 
     tickRef.current = setInterval(() => {
       const startedAt = scanner.scanStartedAt;
+      setCooldownRemainingMs(automationController.getCooldownRemainingMs());
       setIsScanning(startedAt !== null);
       if (startedAt !== null) {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -575,7 +586,15 @@ export function RemoteControlScreen({ onClose }: Props) {
               onPress={() => saveAutomation(!automationEnabled)}
             />
           </View>
-          <Text style={styles.statusText}>Zone: {automationZone}</Text>
+          <Text style={styles.statusText}>
+            {!automationEnabled
+              ? 'Automation is off.'
+              : cooldownRemainingMs > 0
+              ? `Cooling down — next possible change in ${Math.ceil(
+                  cooldownRemainingMs / 1000,
+                )}s`
+              : `Active — zone: ${automationZone}`}
+          </Text>
           <Text style={styles.statusText}>{automationEvent}</Text>
         </View>
 

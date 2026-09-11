@@ -4,6 +4,11 @@ import { CooldownLock } from './cooldownLock';
 export type SensorCombineMode = 'temperature' | 'humidity' | 'and' | 'or';
 export type Zone = 'low' | 'high' | 'unset';
 
+export type EvaluationResult =
+  | { status: 'applied'; action: Partial<HaierYrw02State>; zone: Zone }
+  | { status: 'blocked_cooldown'; wouldEnterZone: Zone; remainingMs: number }
+  | { status: 'no_change' };
+
 export interface ThresholdPair {
   low: number;
   high: number;
@@ -56,11 +61,15 @@ export class HysteresisAutomation {
     return this.zone;
   }
 
+  getCooldownRemainingMs(now: number = Date.now()): number {
+    return this.lock.msUntilTransitionAllowed(now);
+  }
+
   /** Feed a new reading. Returns the action to apply, or null if nothing should change. */
   evaluate(
     reading: SensorSnapshot,
     now: number = Date.now(),
-  ): Partial<HaierYrw02State> | null {
+  ): EvaluationResult {
     const { combineMode, temperature, humidity } = this.config;
 
     const tempLow =
@@ -102,17 +111,33 @@ export class HysteresisAutomation {
     }
 
     if (enterLow && this.zone !== 'low') {
-      if (!this.lock.canTransition(now)) return null;
+      if (!this.lock.canTransition(now)) {
+        return {
+          status: 'blocked_cooldown',
+          wouldEnterZone: 'low',
+          remainingMs: this.lock.msUntilTransitionAllowed(now),
+        };
+      }
       this.zone = 'low';
       this.lock.recordTransition(now);
-      return this.config.lowAction;
+      return { status: 'applied', action: this.config.lowAction, zone: 'low' };
     }
     if (enterHigh && this.zone !== 'high') {
-      if (!this.lock.canTransition(now)) return null;
+      if (!this.lock.canTransition(now)) {
+        return {
+          status: 'blocked_cooldown',
+          wouldEnterZone: 'high',
+          remainingMs: this.lock.msUntilTransitionAllowed(now),
+        };
+      }
       this.zone = 'high';
       this.lock.recordTransition(now);
-      return this.config.highAction;
+      return {
+        status: 'applied',
+        action: this.config.highAction,
+        zone: 'high',
+      };
     }
-    return null;
+    return { status: 'no_change' };
   }
 }
