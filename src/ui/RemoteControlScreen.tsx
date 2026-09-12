@@ -1,5 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
+import {
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+  ScrollView,
+  Switch,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { scanner } from '../ble/sharedScanner';
@@ -9,7 +16,6 @@ import {
   createDefaultState,
   encodeState,
   stateToCommand,
-  nextMode,
   isTurboQuietAvailable,
   stepTimerMinutes,
   formatTimerMinutes,
@@ -23,6 +29,7 @@ import {
 } from '../ir/protocols/acProtocol';
 import { loadAcState, saveAcState } from '../storage/acStateStore';
 import { automationController } from '../automation/automationController';
+import { PowerIcon } from './PowerIcon';
 import {
   AutomationConfig,
   SensorCombineMode,
@@ -39,29 +46,43 @@ interface Props {
   onClose: () => void;
 }
 
-const FAN_CYCLE: HaierFan[] = ['auto', 'low', 'med', 'high'];
-const SWING_V_CYCLE: HaierSwingV[] = [
-  'off',
-  'top',
-  'middle',
-  'bottom',
-  'down',
-  'auto',
-];
-const SWING_H_CYCLE: HaierSwingH[] = [
-  'middle',
-  'leftMax',
-  'left',
-  'right',
-  'rightMax',
-  'auto',
-];
-const MODE_PICK_CYCLE: HaierMode[] = ['auto', 'cool', 'dry', 'heat', 'fan'];
+const AC_ACCENT = '#3d6bff';
+const AUTO_ACCENT = '#18c990';
 
-function nextInCycle<T>(cycle: T[], current: T): T {
-  const idx = cycle.indexOf(current);
-  return cycle[(idx + 1) % cycle.length];
-}
+const MODE_OPTIONS: { value: HaierMode; label: string }[] = [
+  { value: 'cool', label: 'Cool' },
+  { value: 'dry', label: 'Dry' },
+  { value: 'fan', label: 'Fan' },
+];
+const FAN_OPTIONS: { value: HaierFan; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'low', label: 'Low' },
+  { value: 'med', label: 'Med' },
+  { value: 'high', label: 'High' },
+];
+// Simplified from all 6 raw protocol positions down to the 2 that matter
+// day-to-day (sweeping vs fixed), same trim already applied to Mode
+// (Cool/Dry/Fan only, not all 5). The other Swing H positions still exist
+// in the protocol/state, just not wired to a button here.
+const SWING_H_OPTIONS: { value: HaierSwingH; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'middle', label: 'Middle' },
+];
+const SWING_V_OPTIONS: { value: HaierSwingV; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'off', label: 'Off' },
+];
+const TURBO_QUIET_OPTIONS: { value: HaierTurboQuiet; label: string }[] = [
+  { value: 'turbo', label: 'Turbo' },
+  { value: 'off', label: 'Auto' },
+  { value: 'quiet', label: 'Quiet' },
+];
+const TRIGGER_OPTIONS: { value: SensorCombineMode; label: string }[] = [
+  { value: 'temperature', label: 'Temp' },
+  { value: 'humidity', label: 'Hum' },
+  { value: 'and', label: 'AND' },
+  { value: 'or', label: 'OR' },
+];
 
 function formatHms(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);
@@ -70,6 +91,121 @@ function formatHms(totalSeconds: number): string {
   const pad = (n: number) => n.toString().padStart(2, '0');
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
+
+// --- Small reusable pieces -------------------------------------------------
+
+function SegmentedControl<T extends string>({
+  options,
+  value,
+  onChange,
+  accentColor,
+  disabled,
+}: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (v: T) => void;
+  accentColor: string;
+  disabled?: boolean;
+}) {
+  return (
+    <View style={[styles.segmentTrack, disabled && styles.dimmed]}>
+      {options.map(opt => {
+        const active = opt.value === value;
+        return (
+          <Pressable
+            key={opt.value}
+            style={[
+              styles.segmentItem,
+              active && { backgroundColor: accentColor },
+            ]}
+            onPress={() => !disabled && onChange(opt.value)}
+            disabled={disabled}
+          >
+            <Text
+              style={[styles.segmentText, active && styles.segmentTextActive]}
+            >
+              {opt.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function CircleButton({
+  glyph,
+  icon,
+  onPress,
+  active,
+  accentColor,
+  size = 40,
+  disabled,
+}: {
+  glyph?: string;
+  icon?: React.ReactNode;
+  onPress: () => void;
+  active?: boolean;
+  accentColor: string;
+  size?: number;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      style={[
+        styles.circleButton,
+        { width: size, height: size, borderRadius: size / 2 },
+        active && { backgroundColor: accentColor, borderColor: accentColor },
+        disabled && styles.dimmed,
+      ]}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      {icon ?? <Text style={styles.circleButtonText}>{glyph}</Text>}
+    </Pressable>
+  );
+}
+
+function Stepper({
+  label,
+  displayValue,
+  onDecrement,
+  onIncrement,
+  accentColor,
+  disabled,
+}: {
+  label: string;
+  displayValue: string;
+  onDecrement: () => void;
+  onIncrement: () => void;
+  accentColor: string;
+  disabled?: boolean;
+}) {
+  return (
+    <View style={styles.stepperRow}>
+      <Text style={styles.stepperLabel}>{label}</Text>
+      <View style={styles.stepperControls}>
+        <CircleButton
+          glyph="−"
+          onPress={onDecrement}
+          accentColor={accentColor}
+          size={32}
+          disabled={disabled}
+        />
+        <Text style={styles.stepperValue}>{displayValue}</Text>
+        <CircleButton
+          glyph="+"
+          onPress={onIncrement}
+          accentColor={accentColor}
+          size={32}
+          disabled={disabled}
+        />
+      </View>
+    </View>
+  );
+}
+
+// --- Screen -----------------------------------------------------------------
 
 export function RemoteControlScreen({ onClose }: Props) {
   const [acState, setAcState] = useState<HaierYrw02State>(createDefaultState());
@@ -86,6 +222,8 @@ export function RemoteControlScreen({ onClose }: Props) {
 
   const [pendingOnMinutes, setPendingOnMinutes] = useState(0);
   const [pendingOffMinutes, setPendingOffMinutes] = useState(0);
+  const [onTimerArmed, setOnTimerArmed] = useState(false);
+  const [offTimerArmed, setOffTimerArmed] = useState(false);
 
   const [combineMode, setCombineMode] =
     useState<SensorCombineMode>('temperature');
@@ -97,16 +235,18 @@ export function RemoteControlScreen({ onClose }: Props) {
   const [highActionMode, setHighActionMode] = useState<HaierMode>('cool');
   const [automationEnabled, setAutomationEnabled] = useState(false);
   const [automationZone, setAutomationZone] = useState<Zone>('unset');
+  const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
   const [automationEvent, setAutomationEvent] = useState('Automation is off.');
 
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
+  const didMountAutomationEffect = useRef(false);
 
   useEffect(() => {
     loadAcState().then(stored => {
       const { lastUpdated, lastSource, ...state } = stored;
       setAcState(state);
+      setOnTimerArmed(state.onTimerMinutes > 0);
+      setOffTimerArmed(state.offTimerMinutes > 0);
       if (state.onTimerMinutes > 0) setPendingOnMinutes(state.onTimerMinutes);
       if (state.offTimerMinutes > 0)
         setPendingOffMinutes(state.offTimerMinutes);
@@ -140,11 +280,10 @@ export function RemoteControlScreen({ onClose }: Props) {
       setAutomationZone(automationController.getZone());
       if (event.type === 'applied') {
         setAutomationEvent(
-          `Automation applied: ${JSON.stringify(event.action)} (zone: ${
+          `Applied ${JSON.stringify(event.action)} (zone: ${
             event.zone
           }) at ${new Date().toLocaleTimeString()}`,
         );
-        // Reflect the automation's own change in this screen's displayed state too.
         loadAcState().then(stored => {
           const { lastUpdated, lastSource, ...state } = stored;
           setAcState(state);
@@ -153,18 +292,15 @@ export function RemoteControlScreen({ onClose }: Props) {
         setAutomationEvent(
           `Blocked by cooldown — would switch to "${
             event.wouldEnterZone
-          }" zone, but must wait ${Math.ceil(
-            event.remainingMs / 1000,
-          )}s more (protects the AC from rapid switching).`,
+          }", ${Math.ceil(event.remainingMs / 1000)}s left.`,
         );
       } else {
-        setAutomationEvent(`Automation error: ${event.message}`);
+        setAutomationEvent(`Error: ${event.message}`);
       }
     });
 
     tickRef.current = setInterval(() => {
       const startedAt = scanner.scanStartedAt;
-      setCooldownRemainingMs(automationController.getCooldownRemainingMs());
       setIsScanning(startedAt !== null);
       if (startedAt !== null) {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -173,6 +309,7 @@ export function RemoteControlScreen({ onClose }: Props) {
           Math.max(0, Math.floor(MAX_SCAN_DURATION_MS / 1000) - elapsed),
         );
       }
+      setCooldownRemainingMs(automationController.getCooldownRemainingMs());
     }, 1000);
 
     return () => {
@@ -181,6 +318,26 @@ export function RemoteControlScreen({ onClose }: Props) {
       if (tickRef.current) clearInterval(tickRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!didMountAutomationEffect.current) {
+      didMountAutomationEffect.current = true;
+      return;
+    }
+    if (!automationEnabled) return;
+    buildAutomationConfig().then(config =>
+      automationController.setConfig(config),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    combineMode,
+    tempLow,
+    tempHigh,
+    humidityLow,
+    humidityHigh,
+    lowActionMode,
+    highActionMode,
+  ]);
 
   const send = async (patch: Partial<HaierYrw02State>, label: string) => {
     const next: HaierYrw02State = { ...acState, ...patch };
@@ -203,399 +360,379 @@ export function RemoteControlScreen({ onClose }: Props) {
     }
   };
 
-  const armOnTimer = async () => {
-    await send(
-      { onTimerMinutes: pendingOnMinutes, button: BUTTON_CODES.timer },
-      `On timer -> ${formatTimerMinutes(pendingOnMinutes)}`,
+  const togglePower = () =>
+    send(
+      { power: !acState.power, button: BUTTON_CODES.power },
+      acState.power ? 'Power OFF' : 'Power ON',
     );
-    if (pendingOnMinutes > 0) await armOnTimerMirror(pendingOnMinutes);
-    else await disarmOnTimerMirror();
+  const selectMode = (mode: HaierMode) =>
+    send({ mode, button: BUTTON_CODES.mode }, `Mode: ${mode}`);
+  const selectFan = (fan: HaierFan) =>
+    send({ fan, button: BUTTON_CODES.fan }, `Fan: ${fan}`);
+  const selectSwingV = (swingV: HaierSwingV) =>
+    send({ swingV, button: BUTTON_CODES.swingV }, `Swing V: ${swingV}`);
+  const selectSwingH = (swingH: HaierSwingH) =>
+    send({ swingH, button: BUTTON_CODES.swingH }, `Swing H: ${swingH}`);
+  const selectTurboQuiet = (turboQuiet: HaierTurboQuiet) =>
+    send(
+      { turboQuiet, button: BUTTON_CODES.turbo },
+      `Turbo/Quiet: ${turboQuiet}`,
+    );
+
+  const toggleOnTimer = async () => {
+    if (onTimerArmed) {
+      await send(
+        { onTimerMinutes: 0, button: BUTTON_CODES.timer },
+        'On timer cancelled',
+      );
+      await disarmOnTimerMirror();
+      setOnTimerArmed(false);
+    } else {
+      await send(
+        { onTimerMinutes: pendingOnMinutes, button: BUTTON_CODES.timer },
+        `On timer armed (${formatTimerMinutes(pendingOnMinutes)})`,
+      );
+      if (pendingOnMinutes > 0) await armOnTimerMirror(pendingOnMinutes);
+      setOnTimerArmed(true);
+    }
   };
 
-  const armOffTimer = async () => {
-    await send(
-      { offTimerMinutes: pendingOffMinutes, button: BUTTON_CODES.timer },
-      `Off timer -> ${formatTimerMinutes(pendingOffMinutes)}`,
-    );
-    if (pendingOffMinutes > 0) await armOffTimerMirror(pendingOffMinutes);
-    else await disarmOffTimerMirror();
+  const toggleOffTimer = async () => {
+    if (offTimerArmed) {
+      await send(
+        { offTimerMinutes: 0, button: BUTTON_CODES.timer },
+        'Off timer cancelled',
+      );
+      await disarmOffTimerMirror();
+      setOffTimerArmed(false);
+    } else {
+      await send(
+        { offTimerMinutes: pendingOffMinutes, button: BUTTON_CODES.timer },
+        `Off timer armed (${formatTimerMinutes(pendingOffMinutes)})`,
+      );
+      if (pendingOffMinutes > 0) await armOffTimerMirror(pendingOffMinutes);
+      setOffTimerArmed(true);
+    }
   };
 
-  const saveAutomation = async (enable: boolean) => {
-    const config: AutomationConfig = {
-      combineMode,
-      temperature:
-        combineMode === 'temperature' ||
-        combineMode === 'and' ||
-        combineMode === 'or'
-          ? { low: tempLow, high: tempHigh }
-          : undefined,
-      humidity:
-        combineMode === 'humidity' ||
-        combineMode === 'and' ||
-        combineMode === 'or'
-          ? { low: humidityLow, high: humidityHigh }
-          : undefined,
-      lowAction: { mode: lowActionMode, button: BUTTON_CODES.mode },
-      highAction: { mode: highActionMode, button: BUTTON_CODES.mode },
-      minTransitionIntervalMs: 3 * 60_000,
-    };
+  const buildAutomationConfig = async (): Promise<AutomationConfig> => ({
+    combineMode,
+    temperature:
+      combineMode === 'temperature' ||
+      combineMode === 'and' ||
+      combineMode === 'or'
+        ? { low: tempLow, high: tempHigh }
+        : undefined,
+    humidity:
+      combineMode === 'humidity' ||
+      combineMode === 'and' ||
+      combineMode === 'or'
+        ? { low: humidityLow, high: humidityHigh }
+        : undefined,
+    lowAction: { mode: lowActionMode, button: BUTTON_CODES.mode },
+    highAction: { mode: highActionMode, button: BUTTON_CODES.mode },
+    minTransitionIntervalMs: 3 * 60_000,
+  });
+
+  const toggleAutomation = async (enable: boolean) => {
+    const config = await buildAutomationConfig();
     await automationController.setConfig(config);
     await automationController.setEnabled(enable);
     setAutomationEnabled(enable);
     setAutomationEvent(enable ? 'Automation enabled.' : 'Automation disabled.');
   };
 
-  const Btn = ({
-    label,
-    onPress,
-    active,
-    disabled,
-  }: {
-    label: string;
-    onPress: () => void;
-    active?: boolean;
-    disabled?: boolean;
-  }) => (
-    <Pressable
-      style={[
-        styles.button,
-        active && styles.buttonActive,
-        (sending || disabled) && styles.buttonDisabled,
-      ]}
-      onPress={onPress}
-      disabled={sending || disabled}
-    >
-      <Text style={styles.buttonText}>{label}</Text>
-    </Pressable>
-  );
-
   const turboQuietEnabled = isTurboQuietAvailable(acState.mode);
+  const showTemp =
+    combineMode === 'temperature' ||
+    combineMode === 'and' ||
+    combineMode === 'or';
+  const showHumidity =
+    combineMode === 'humidity' || combineMode === 'and' || combineMode === 'or';
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
         <View style={styles.header}>
-          <Text style={styles.title}>AC Remote (Haier YR-W02)</Text>
+          <Text style={styles.title}>AC Remote</Text>
           <Pressable onPress={onClose}>
             <Text style={styles.closeLink}>Close</Text>
           </Pressable>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardHeading}>Scanner</Text>
-          <Text style={styles.statusText}>
-            Status: {isScanning ? 'Running' : 'Stopped'}
+        {/* Merged status card: scanner sub-row (secondary) + AC hero (primary) */}
+        <View style={[styles.card, { borderColor: AC_ACCENT + '33' }]}>
+          <View style={styles.scannerRow}>
+            <View
+              style={[styles.dot, isScanning ? styles.dotOn : styles.dotOff]}
+            />
+            <Text style={styles.scannerText}>
+              {isScanning
+                ? `Scanning ${formatHms(
+                    elapsedSeconds,
+                  )} · auto-stop in ${formatHms(remainingSeconds)}`
+                : 'Scanner stopped'}
+            </Text>
+          </View>
+          <Text style={styles.roomText}>
+            Room {liveTemp !== undefined ? `${liveTemp}°C` : '—'} ·{' '}
+            {liveHumidity !== undefined ? `${liveHumidity}%` : '—'} RH
           </Text>
-          {isScanning && (
-            <>
-              <Text style={styles.statusText}>
-                Elapsed: {formatHms(elapsedSeconds)}
-              </Text>
-              <Text style={styles.statusText}>
-                Auto-stops in: {formatHms(remainingSeconds)} (6h max)
-              </Text>
-            </>
-          )}
-          <Text style={styles.statusText}>
-            Temp: {liveTemp !== undefined ? `${liveTemp}°C` : '—'} Humidity:{' '}
-            {liveHumidity !== undefined ? `${liveHumidity}%` : '—'}
-          </Text>
-        </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardHeading}>Current AC state</Text>
-          <Text style={styles.statusText}>
-            Power: {acState.power ? 'ON' : 'OFF'} Mode:{' '}
-            {acState.mode.toUpperCase()} Temp: {acState.tempC}°C
-          </Text>
-          <Text style={styles.statusText}>
-            Fan: {acState.fan} Swing V: {acState.swingV} Swing H:{' '}
-            {acState.swingH}
-          </Text>
-          <Text style={styles.statusText}>
-            Turbo/Quiet: {acState.turboQuiet}
-          </Text>
-          <Text style={styles.statusText}>
-            On timer: {formatTimerMinutes(acState.onTimerMinutes)} Off timer:{' '}
-            {formatTimerMinutes(acState.offTimerMinutes)}
-          </Text>
-        </View>
+          <View style={styles.heroDivider} />
 
-        <Text style={styles.sectionLabel}>Power / Mode</Text>
-        <View style={styles.row}>
-          <Btn
-            label="Power ON"
-            onPress={() =>
-              send({ power: true, button: BUTTON_CODES.power }, 'Power ON')
-            }
-          />
-          <Btn
-            label="Power OFF"
-            onPress={() =>
-              send({ power: false, button: BUTTON_CODES.power }, 'Power OFF')
-            }
-          />
-        </View>
-        <View style={styles.row}>
-          <Btn
-            label={`Mode ▸ (${nextMode(acState.mode)})`}
-            onPress={() =>
-              send(
-                { mode: nextMode(acState.mode), button: BUTTON_CODES.mode },
-                'Mode cycle',
-              )
-            }
-          />
-        </View>
-        <View style={styles.row}>
-          <Btn
-            label="Cool"
-            onPress={() =>
-              send({ mode: 'cool', button: BUTTON_CODES.mode }, 'Cool')
-            }
-          />
-          <Btn
-            label="Dry"
-            onPress={() =>
-              send({ mode: 'dry', button: BUTTON_CODES.mode }, 'Dry')
-            }
-          />
-        </View>
-
-        <Text style={styles.sectionLabel}>Temperature</Text>
-        <View style={styles.row}>
-          <Btn
-            label="Temp −"
-            onPress={() =>
-              send(
-                {
-                  tempC: Math.max(16, acState.tempC - 1),
-                  button: BUTTON_CODES.tempDown,
-                },
-                'Temp down',
-              )
-            }
-          />
-          <Btn
-            label="Temp +"
-            onPress={() =>
-              send(
-                {
-                  tempC: Math.min(30, acState.tempC + 1),
-                  button: BUTTON_CODES.tempUp,
-                },
-                'Temp up',
-              )
-            }
-          />
-        </View>
-
-        <Text style={styles.sectionLabel}>Fan / Swing</Text>
-        <View style={styles.row}>
-          <Btn
-            label={`Fan ▸ (${nextInCycle(FAN_CYCLE, acState.fan)})`}
-            onPress={() =>
-              send(
-                {
-                  fan: nextInCycle(FAN_CYCLE, acState.fan),
-                  button: BUTTON_CODES.fan,
-                },
-                'Fan cycle',
-              )
-            }
-          />
-        </View>
-        <View style={styles.row}>
-          <Btn
-            label={`Swing V ▸ (${nextInCycle(SWING_V_CYCLE, acState.swingV)})`}
-            onPress={() =>
-              send(
-                {
-                  swingV: nextInCycle(SWING_V_CYCLE, acState.swingV),
-                  button: BUTTON_CODES.swingV,
-                },
-                'Swing V cycle',
-              )
-            }
-          />
-        </View>
-        <View style={styles.row}>
-          <Btn
-            label={`Swing H ▸ (${nextInCycle(SWING_H_CYCLE, acState.swingH)})`}
-            onPress={() =>
-              send(
-                {
-                  swingH: nextInCycle(SWING_H_CYCLE, acState.swingH),
-                  button: BUTTON_CODES.swingH,
-                },
-                'Swing H cycle',
-              )
-            }
-          />
-        </View>
-
-        <Text style={styles.sectionLabel}>
-          Turbo / Quiet {!turboQuietEnabled && '(cool/heat mode only)'}
-        </Text>
-        <View style={styles.row}>
-          <Btn
-            label="Turbo"
-            active={acState.turboQuiet === 'turbo'}
-            disabled={!turboQuietEnabled}
-            onPress={() =>
-              send({ turboQuiet: 'turbo', button: BUTTON_CODES.turbo }, 'Turbo')
-            }
-          />
-          <Btn
-            label="Quiet"
-            active={acState.turboQuiet === 'quiet'}
-            disabled={!turboQuietEnabled}
-            onPress={() =>
-              send({ turboQuiet: 'quiet', button: BUTTON_CODES.turbo }, 'Quiet')
-            }
-          />
-          <Btn
-            label="Auto"
-            active={acState.turboQuiet === 'off'}
-            disabled={!turboQuietEnabled}
-            onPress={() =>
-              send(
-                { turboQuiet: 'off', button: BUTTON_CODES.turbo },
-                'Turbo/Quiet off',
-              )
-            }
-          />
-        </View>
-
-        <Text style={styles.sectionLabel}>
-          Native On/Off Timer (AC's own hardware timer)
-        </Text>
-        <View style={styles.row}>
-          <Text style={styles.timerLabel}>
-            On in: {formatTimerMinutes(pendingOnMinutes)}
-          </Text>
-        </View>
-        <View style={styles.row}>
-          <Btn
-            label="−"
-            onPress={() => setPendingOnMinutes(m => stepTimerMinutes(m, -1))}
-          />
-          <Btn
-            label="+"
-            onPress={() => setPendingOnMinutes(m => stepTimerMinutes(m, 1))}
-          />
-          <Btn label="Arm" onPress={armOnTimer} />
-        </View>
-        <View style={styles.row}>
-          <Text style={styles.timerLabel}>
-            Off in: {formatTimerMinutes(pendingOffMinutes)}
-          </Text>
-        </View>
-        <View style={styles.row}>
-          <Btn
-            label="−"
-            onPress={() => setPendingOffMinutes(m => stepTimerMinutes(m, -1))}
-          />
-          <Btn
-            label="+"
-            onPress={() => setPendingOffMinutes(m => stepTimerMinutes(m, 1))}
-          />
-          <Btn label="Arm" onPress={armOffTimer} />
-        </View>
-
-        <Text style={styles.sectionLabel}>Automation</Text>
-        <View style={styles.card}>
-          <View style={styles.row}>
-            <Btn
-              label={`Trigger on ▸ ${combineMode}`}
+          <View style={styles.heroRow}>
+            <CircleButton
+              glyph="−"
               onPress={() =>
-                setCombineMode(
-                  nextInCycle(
-                    ['temperature', 'humidity', 'and', 'or'],
-                    combineMode,
-                  ),
+                send(
+                  {
+                    tempC: Math.max(16, acState.tempC - 1),
+                    button: BUTTON_CODES.tempDown,
+                  },
+                  'Temp down',
                 )
               }
+              accentColor={AC_ACCENT}
+              size={44}
+            />
+            <View style={styles.heroCenter}>
+              <Text style={styles.heroCaption}>SET TEMP</Text>
+              <Text style={styles.heroTemp}>{acState.tempC}°</Text>
+            </View>
+            <CircleButton
+              glyph="+"
+              onPress={() =>
+                send(
+                  {
+                    tempC: Math.min(30, acState.tempC + 1),
+                    button: BUTTON_CODES.tempUp,
+                  },
+                  'Temp up',
+                )
+              }
+              accentColor={AC_ACCENT}
+              size={44}
             />
           </View>
 
-          {(combineMode === 'temperature' ||
-            combineMode === 'and' ||
-            combineMode === 'or') && (
-            <>
-              <Text style={styles.timerLabel}>
-                Temp low: {tempLow}°C / high: {tempHigh}°C
-              </Text>
-              <View style={styles.row}>
-                <Btn label="Low −" onPress={() => setTempLow(v => v - 0.5)} />
-                <Btn label="Low +" onPress={() => setTempLow(v => v + 0.5)} />
-                <Btn label="High −" onPress={() => setTempHigh(v => v - 0.5)} />
-                <Btn label="High +" onPress={() => setTempHigh(v => v + 0.5)} />
-              </View>
-            </>
-          )}
+          <View style={styles.heroFooterRow}>
+            <Text style={styles.heroSummary}>
+              {acState.mode.toUpperCase()} · Fan {acState.fan} · Swing{' '}
+              {acState.swingV === 'auto' || acState.swingH === 'auto'
+                ? 'Auto'
+                : 'Off'}
+              {acState.turboQuiet !== 'off' ? ` · ${acState.turboQuiet}` : ''}
+            </Text>
+            <CircleButton
+              icon={<PowerIcon size={17} />}
+              onPress={togglePower}
+              active={acState.power}
+              accentColor={AC_ACCENT}
+              size={38}
+            />
+          </View>
+        </View>
 
-          {(combineMode === 'humidity' ||
-            combineMode === 'and' ||
-            combineMode === 'or') && (
-            <>
-              <Text style={styles.timerLabel}>
-                Humidity low: {humidityLow}% / high: {humidityHigh}%
-              </Text>
-              <View style={styles.row}>
-                <Btn label="Low −" onPress={() => setHumidityLow(v => v - 1)} />
-                <Btn label="Low +" onPress={() => setHumidityLow(v => v + 1)} />
-                <Btn
-                  label="High −"
-                  onPress={() => setHumidityHigh(v => v - 1)}
-                />
-                <Btn
-                  label="High +"
-                  onPress={() => setHumidityHigh(v => v + 1)}
-                />
-              </View>
-            </>
-          )}
-
-          <Text style={styles.timerLabel}>
-            Low zone action: {lowActionMode} High zone action: {highActionMode}
+        {/* AC controls card — Xiaomi-style segmented controls, distinct blue accent */}
+        <View style={[styles.card, { borderColor: AC_ACCENT + '33' }]}>
+          <Text style={[styles.cardHeading, { color: AC_ACCENT }]}>
+            Controls
           </Text>
-          <View style={styles.row}>
-            <Btn
-              label="Low action ▸"
-              onPress={() =>
-                setLowActionMode(nextInCycle(MODE_PICK_CYCLE, lowActionMode))
-              }
-            />
-            <Btn
-              label="High action ▸"
-              onPress={() =>
-                setHighActionMode(nextInCycle(MODE_PICK_CYCLE, highActionMode))
-              }
+
+          <Text style={styles.controlLabel}>Mode</Text>
+          <SegmentedControl
+            options={MODE_OPTIONS}
+            value={acState.mode as HaierMode}
+            onChange={selectMode}
+            accentColor={AC_ACCENT}
+          />
+
+          <Text style={styles.controlLabel}>Fan Speed</Text>
+          <SegmentedControl
+            options={FAN_OPTIONS}
+            value={acState.fan}
+            onChange={selectFan}
+            accentColor={AC_ACCENT}
+          />
+
+          <View style={styles.splitRow}>
+            <View style={styles.splitCol}>
+              <Text style={styles.controlLabel}>Swing V</Text>
+              <SegmentedControl
+                options={SWING_V_OPTIONS}
+                value={acState.swingV}
+                onChange={selectSwingV}
+                accentColor={AC_ACCENT}
+              />
+            </View>
+            <View style={styles.splitCol}>
+              <Text style={styles.controlLabel}>Swing H</Text>
+              <SegmentedControl
+                options={SWING_H_OPTIONS}
+                value={acState.swingH}
+                onChange={selectSwingH}
+                accentColor={AC_ACCENT}
+              />
+            </View>
+          </View>
+
+          <Text style={styles.controlLabel}>
+            {turboQuietEnabled
+              ? 'Turbo / Quiet'
+              : 'Turbo / Quiet (cool mode only)'}
+          </Text>
+          <SegmentedControl
+            options={TURBO_QUIET_OPTIONS}
+            value={acState.turboQuiet}
+            onChange={selectTurboQuiet}
+            accentColor={AC_ACCENT}
+            disabled={!turboQuietEnabled}
+          />
+
+          <Text style={styles.controlLabel}>On Timer</Text>
+          <Stepper
+            label=""
+            displayValue={
+              onTimerArmed
+                ? formatTimerMinutes(acState.onTimerMinutes)
+                : formatTimerMinutes(pendingOnMinutes)
+            }
+            onDecrement={() =>
+              setPendingOnMinutes(m => stepTimerMinutes(m, -1))
+            }
+            onIncrement={() => setPendingOnMinutes(m => stepTimerMinutes(m, 1))}
+            accentColor={AC_ACCENT}
+            disabled={onTimerArmed}
+          />
+          <View style={styles.confirmRow}>
+            <CircleButton
+              glyph="✓"
+              onPress={toggleOnTimer}
+              active={onTimerArmed}
+              accentColor={AC_ACCENT}
+              size={34}
             />
           </View>
 
-          <View style={styles.row}>
-            <Btn
-              label={
-                automationEnabled
-                  ? 'Disable automation'
-                  : 'Save & Enable automation'
-              }
-              onPress={() => saveAutomation(!automationEnabled)}
+          <Text style={styles.controlLabel}>Off Timer</Text>
+          <Stepper
+            label=""
+            displayValue={
+              offTimerArmed
+                ? formatTimerMinutes(acState.offTimerMinutes)
+                : formatTimerMinutes(pendingOffMinutes)
+            }
+            onDecrement={() =>
+              setPendingOffMinutes(m => stepTimerMinutes(m, -1))
+            }
+            onIncrement={() =>
+              setPendingOffMinutes(m => stepTimerMinutes(m, 1))
+            }
+            accentColor={AC_ACCENT}
+            disabled={offTimerArmed}
+          />
+          <View style={styles.confirmRow}>
+            <CircleButton
+              glyph="✓"
+              onPress={toggleOffTimer}
+              active={offTimerArmed}
+              accentColor={AC_ACCENT}
+              size={34}
             />
           </View>
+        </View>
+
+        {/* Automation card — distinct teal accent, native Switch, compact rows */}
+        <View style={[styles.card, { borderColor: AUTO_ACCENT + '33' }]}>
+          <View style={styles.automationHeaderRow}>
+            <Text
+              style={[
+                styles.cardHeading,
+                { color: AUTO_ACCENT, marginBottom: 0 },
+              ]}
+            >
+              Automation
+            </Text>
+            <Switch
+              value={automationEnabled}
+              onValueChange={toggleAutomation}
+              trackColor={{ false: '#2a2f38', true: AUTO_ACCENT + '88' }}
+              thumbColor={automationEnabled ? AUTO_ACCENT : '#7d8494'}
+            />
+          </View>
+
+          <Text style={styles.controlLabel}>Trigger Sensor</Text>
+          <SegmentedControl
+            options={TRIGGER_OPTIONS}
+            value={combineMode}
+            onChange={setCombineMode}
+            accentColor={AUTO_ACCENT}
+          />
+
+          {showTemp && (
+            <>
+              <Stepper
+                label="Temp Low"
+                displayValue={`${tempLow}°C`}
+                onDecrement={() => setTempLow(v => v - 0.5)}
+                onIncrement={() => setTempLow(v => v + 0.5)}
+                accentColor={AUTO_ACCENT}
+              />
+              <Stepper
+                label="Temp High"
+                displayValue={`${tempHigh}°C`}
+                onDecrement={() => setTempHigh(v => v - 0.5)}
+                onIncrement={() => setTempHigh(v => v + 0.5)}
+                accentColor={AUTO_ACCENT}
+              />
+            </>
+          )}
+          {showHumidity && (
+            <>
+              <Stepper
+                label="Hum Low"
+                displayValue={`${humidityLow}%`}
+                onDecrement={() => setHumidityLow(v => v - 1)}
+                onIncrement={() => setHumidityLow(v => v + 1)}
+                accentColor={AUTO_ACCENT}
+              />
+              <Stepper
+                label="Hum High"
+                displayValue={`${humidityHigh}%`}
+                onDecrement={() => setHumidityHigh(v => v - 1)}
+                onIncrement={() => setHumidityHigh(v => v + 1)}
+                accentColor={AUTO_ACCENT}
+              />
+            </>
+          )}
+
+          <Text style={styles.controlLabel}>Below Low → </Text>
+          <SegmentedControl
+            options={MODE_OPTIONS}
+            value={lowActionMode}
+            onChange={setLowActionMode}
+            accentColor={AUTO_ACCENT}
+          />
+          <Text style={styles.controlLabel}>Above High → </Text>
+          <SegmentedControl
+            options={MODE_OPTIONS}
+            value={highActionMode}
+            onChange={setHighActionMode}
+            accentColor={AUTO_ACCENT}
+          />
+
+          <View style={styles.heroDivider} />
           <Text style={styles.statusText}>
             {!automationEnabled
-              ? '-.'
+              ? 'Automation is off.'
               : cooldownRemainingMs > 0
               ? `Cooling down — next possible change in ${Math.ceil(
                   cooldownRemainingMs / 1000,
                 )}s`
               : `Active — zone: ${automationZone}`}
           </Text>
-          <Text style={styles.statusText}>{automationEvent}</Text>
+          <Text style={styles.statusTextMuted}>{automationEvent}</Text>
         </View>
 
         <Text style={styles.resultLabel}>Last transmit result</Text>
@@ -618,42 +755,123 @@ const styles = StyleSheet.create({
   },
   title: { color: '#f2f4f7', fontSize: 20, fontWeight: '700' },
   closeLink: { color: '#8ab4ff', fontSize: 14 },
+
   card: {
     backgroundColor: '#12151a',
-    borderRadius: 14,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: '#262b33',
-    padding: 14,
+    padding: 16,
     marginBottom: 14,
   },
   cardHeading: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
+  },
+
+  scannerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
+  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
+  dotOn: { backgroundColor: '#4caf6f' },
+  dotOff: { backgroundColor: '#4d5361' },
+  scannerText: { color: '#8a92a3', fontSize: 12 },
+  roomText: { color: '#8a92a3', fontSize: 12, marginLeft: 16 },
+
+  heroDivider: { height: 1, backgroundColor: '#262b33', marginVertical: 14 },
+
+  heroRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 24,
+  },
+  heroCenter: { alignItems: 'center', minWidth: 90 },
+  heroCaption: {
+    color: '#8a92a3',
+    fontSize: 11,
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  heroTemp: {
+    color: '#f2f4f7',
+    fontSize: 56,
+    fontWeight: '700',
+    lineHeight: 60,
+  },
+
+  heroFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 14,
+  },
+  heroSummary: { color: '#8a92a3', fontSize: 12, flex: 1, marginRight: 10 },
+
+  controlLabel: {
     color: '#8a92a3',
     fontSize: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 8,
+    marginTop: 10,
+    marginBottom: 6,
   },
-  statusText: { color: '#f2f4f7', fontSize: 13, marginBottom: 4 },
-  sectionLabel: {
-    color: '#8a92a3',
-    fontSize: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginTop: 4,
-    marginBottom: 8,
+
+  segmentTrack: {
+    flexDirection: 'row',
+    backgroundColor: '#1c212b',
+    borderRadius: 12,
+    padding: 3,
+    gap: 3,
   },
-  timerLabel: { color: '#f2f4f7', fontSize: 13, marginBottom: 6 },
-  row: { flexDirection: 'row', gap: 8, marginBottom: 10 },
-  button: {
+  segmentItem: {
     flex: 1,
-    backgroundColor: '#2a2f38',
-    paddingVertical: 12,
-    borderRadius: 10,
+    paddingVertical: 9,
+    borderRadius: 9,
     alignItems: 'center',
   },
-  buttonActive: { backgroundColor: '#3d6bff' },
-  buttonDisabled: { opacity: 0.4 },
-  buttonText: { color: '#ffffff', fontWeight: '600', fontSize: 13 },
+  segmentText: { color: '#8a92a3', fontSize: 13, fontWeight: '600' },
+  segmentTextActive: { color: '#ffffff' },
+  dimmed: { opacity: 0.4 },
+
+  splitRow: { flexDirection: 'row', gap: 14 },
+  splitCol: { flex: 1 },
+
+  circleButton: {
+    borderWidth: 1,
+    borderColor: '#2a2f38',
+    backgroundColor: '#1c212b',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  circleButtonText: { color: '#f2f4f7', fontSize: 16, fontWeight: '700' },
+
+  stepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  stepperLabel: { color: '#f2f4f7', fontSize: 13 },
+  stepperControls: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  stepperValue: {
+    color: '#f2f4f7',
+    fontSize: 14,
+    fontWeight: '600',
+    minWidth: 56,
+    textAlign: 'center',
+  },
+
+  confirmRow: { alignItems: 'flex-end', marginBottom: 4 },
+
+  automationHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+
+  statusText: { color: '#f2f4f7', fontSize: 13, marginBottom: 4 },
+  statusTextMuted: { color: '#8a92a3', fontSize: 12 },
+
   resultLabel: {
     color: '#8a92a3',
     fontSize: 12,
