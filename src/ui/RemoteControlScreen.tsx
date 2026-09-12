@@ -588,7 +588,7 @@ export function RemoteControlScreen({ onClose }: Props) {
           </View>
           <Text style={styles.statusText}>
             {!automationEnabled
-              ? 'Automation is off.'
+              ? '-.'
               : cooldownRemainingMs > 0
               ? `Cooling down — next possible change in ${Math.ceil(
                   cooldownRemainingMs / 1000,
