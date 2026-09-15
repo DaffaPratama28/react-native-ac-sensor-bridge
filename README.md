@@ -1,97 +1,75 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# IR Home Bridge
 
-# Getting Started
+A local-only smart home bridge for a non-smart split AC. No cloud, no third-party hub, no subscription — just a spare Android phone doing all the work on-device.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+The idea: a Xiaomi Mijia 3 temp/humidity sensor broadcasts encrypted BLE advertisements, this app passively reads and decrypts them, runs a hysteresis loop against configurable thresholds, and fires IR commands at the AC through the phone's built-in IR blaster. Runs as a persistent foreground service so it survives screen-off and backgrounding indefinitely.
 
-## Step 1: Start Metro
+## Why
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+Wanted automatic AC control based on room temperature without buying a smart AC or a smart plug + third-party sensor combo, and without sending anything to the cloud. An old phone with an IR blaster sitting in a drawer was already most of the hardware needed — this app is the rest.
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+## How it works
 
-```sh
-# Using npm
-npm start
-
-# OR using Yarn
-yarn start
+```
+Mijia 3 sensor (BLE advertisement, encrypted)
+        |
+        v
+Passive BLE scan (native Android)
+        |
+        v
+AES-CCM decrypt (Bindkey from .env)
+        |
+        v
+Hysteresis automation loop (with cooldown lock)
+        |
+        v
+IR command matrix -> ConsumerIrManager -> AC
 ```
 
-## Step 2: Build and run your app
+- **BLE**: Passive scanning only, filtered on the MiBeacon service UUID. No `.connect()` — the sensor drops active BLE sessions almost immediately, so this has to be advertisement-only. Implemented as a native Android module rather than a JS BLE library, since manufacturer-data filtering and background reliability needed more control than the RN wrappers give you.
+- **Decrypt**: AES-CCM using `react-native-quick-crypto`, with the Bindkey + MAC pulled from `.env` at build time (never hardcoded — see Setup below).
+- **Automation**: Simple Schmidt-trigger hysteresis (e.g. ≥28°C turns cooling on, ≤26°C turns it off) with a mandatory cooldown lock after every power-off, so the compressor doesn't get hammered with rapid on/off cycles.
+- **IR**: Full-state command matrices (power + mode + temp + fan + checksum) sent through `ConsumerIrManager`, not toggle codes — matches how most split AC remotes actually work.
+- **Persistence**: A real native Android Foreground Service with a notification channel, not a JS background task library. Those get throttled by the OS and aren't reliable enough for something that needs to run 24/7.
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
+## Tested hardware
 
-### Android
+| Device              | BLE scanning                | IR transmit | Notes                                                                                                                                                                                                                                                         |
+| ------------------- | --------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Xiaomi 14 (HyperOS) | Works                       | Works       | HyperOS occasionally kills the BLE scan in the background when the screen's off — scan doesn't resume on its own and needs an app restart. Still tracking this down, looks like a HyperOS-specific background restriction rather than a bug in the scan code. |
+| Samsung A31         | Works, including screen-off | Not tested  | No IR blaster on this device, so IR transmit couldn't be tested here. Scanning is solid with the screen off, unlike the Xiaomi — points at the HyperOS issue above being OEM-specific rather than a general Android background BLE limitation.                |
 
-```sh
-# Using npm
-npm run android
+If you're running this on a different device and BLE scanning silently stops after screen-off, check the OEM's background activity / battery optimization restrictions first — this seems to be an OEM thing more than an Android-version thing.
 
-# OR using Yarn
-yarn android
-```
+## AC compatibility
 
-### iOS
+The IR command set targets the **YR-W02 Haier protocol**. In Indonesia this is what **Aqua**-branded split AC units use. Any AC using the same protocol should work in theory since the IR layer targets the protocol and not a specific brand, but only the Aqua unit has actually been tested — treat other YR-W02 units as untested until confirmed.
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
+## Setup
 
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
+1. Clone the repo and install dependencies:
+   ```bash
+   npm install
+   ```
+2. Copy `.env.example` to `.env` and fill in your own sensor's MAC address and Bindkey (obtained via a BLE flashing/sniffing tool like Telink Flasher — not something this repo provides):
+   ```bash
+   cp .env.example .env
+   ```
+3. Run on a connected Android device (this needs real hardware — an emulator has neither a BLE radio nor an IR blaster):
+   ```bash
+   npx react-native run-android
+   ```
 
-```sh
-bundle install
-```
+Your `.env` is gitignored. Never commit real Bindkeys or MAC addresses — the values in `.env.example` are placeholders only.
 
-Then, and every time you update your native dependencies, run:
+## Status
 
-```sh
-bundle exec pod install
-```
+Roughly 95% there. BLE scanning, decryption, hysteresis, cooldown lock, and IR transmit are all working end to end on real hardware. Remaining:
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+- [ ] Track down the HyperOS background BLE scan drop and add auto-restart/recovery instead of requiring a manual app restart
+- [ ] Test IR transmit against more YR-W02-protocol units beyond the Aqua unit
+- [ ] General config UI polish (thresholds/cooldown are currently configurable constants, not yet exposed in-app)
 
-```sh
-# Using npm
-npm run ios
+## Disclaimer
 
-# OR using Yarn
-yarn ios
-```
-
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
-
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
-
-## Step 3: Modify your app
-
-Now that you have successfully run the app, let's make changes!
-
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
-
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
-
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+This controls physical hardware (a compressor-based AC unit) via inferred/sourced IR protocols. The cooldown lock exists specifically to protect the compressor from rapid cycling — don't lower it below manufacturer-recommended minimums. Raw IR pulse data sourced from public IR databases should be validated against your actual unit before relying on it unattended.

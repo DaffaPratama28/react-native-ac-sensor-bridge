@@ -16,11 +16,16 @@ import { scanner } from './src/ble/sharedScanner';
 
 import { automationController } from './src/automation/automationController';
 import { startBackgroundTicker } from './src/automation/backgroundTicker';
+import { Zone } from './src/automation/hysteresis';
 
 automationController.loadPersisted().catch(() => {});
 startBackgroundTicker();
 
 const MAX_LOG_LINES = 200;
+
+const TEMP_ACCENT = '#ff9d5c';
+const HUMIDITY_ACCENT = '#5ac8ff';
+const AUTOMATION_ACCENT = '#18c990';
 
 function formatElapsed(totalSeconds: number): string {
   const h = Math.floor(totalSeconds / 3600);
@@ -28,6 +33,12 @@ function formatElapsed(totalSeconds: number): string {
   const s = totalSeconds % 60;
   const pad = (n: number) => n.toString().padStart(2, '0');
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+function zoneLabel(zone: Zone): string {
+  if (zone === 'low') return 'Low zone';
+  if (zone === 'high') return 'High zone';
+  return 'Not yet triggered';
 }
 
 function AppContent() {
@@ -39,8 +50,14 @@ function AppContent() {
   );
   const [logLines, setLogLines] = useState<string[]>([]);
   const [historyVisible, setHistoryVisible] = useState(false);
-
   const [showRemote, setShowRemote] = useState(false);
+
+  const [automationEnabled, setAutomationEnabled] = useState(
+    automationController.isEnabled(),
+  );
+  const [automationZone, setAutomationZone] = useState<Zone>(
+    automationController.getZone(),
+  );
 
   const elapsedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
@@ -60,6 +77,7 @@ function AppContent() {
     const unsubUpdate = scanner.onUpdate(u => {
       setLastTemp(u.reading.temperatureC);
       setLastHumidity(u.reading.humidityPercent);
+      setAutomationZone(automationController.getZone());
 
       pushLog(
         `${new Date(u.timestamp).toLocaleTimeString()} temp=${
@@ -77,24 +95,48 @@ function AppContent() {
         timestamp: u.timestamp,
         mac: u.mac,
         reading: u.rawReading,
-      }).catch(e => pushLog(`ERROR: failed to store reading: ${e.message}`));
+      }).catch(e => pushLog(`Couldn't save reading: ${e.message}`));
     });
 
     const unsubError = scanner.onError(e => {
-      pushLog(`ERROR: ${e.message}`);
+      pushLog(`Sensor error: ${e.message}`);
+    });
+
+    const unsubAutomation = automationController.onEvent(event => {
+      if (event.type === 'applied') {
+        setAutomationZone(event.zone);
+        pushLog(`Automation applied ${event.zone} zone settings.`);
+      } else if (event.type === 'error') {
+        pushLog(`Automation error: ${event.message}`);
+      }
     });
 
     return () => {
       unsubUpdate();
       unsubError();
+      unsubAutomation();
       scanner.stop(); // stop(), not destroy() — see earlier note on why destroy() is reserved for true app shutdown.
     };
   }, []);
 
-  const handleStart = async () => {
+  const handleToggleScan = async () => {
+    if (scanning) {
+      await scanner.stop();
+      await stopForegroundMonitoring(); // Also removes the persistent notification — see MijiaForegroundService.onDestroy().
+
+      if (elapsedIntervalRef.current) {
+        clearInterval(elapsedIntervalRef.current);
+        elapsedIntervalRef.current = null;
+      }
+
+      setScanning(false);
+      pushLog('Monitoring stopped.');
+      return;
+    }
+
     const granted = await scanner.requestPermissions();
     if (!granted) {
-      pushLog('ERROR: BLE permissions not granted');
+      pushLog("Couldn't start — Bluetooth permission not granted.");
       return;
     }
 
@@ -108,97 +150,93 @@ function AppContent() {
     }, 1000);
 
     setScanning(true);
-    pushLog('Scan started.');
-  };
-
-  const handleStop = async () => {
-    await scanner.stop();
-    await stopForegroundMonitoring(); // Also removes the persistent notification — see MijiaForegroundService.onDestroy().
-
-    if (elapsedIntervalRef.current) {
-      clearInterval(elapsedIntervalRef.current);
-      elapsedIntervalRef.current = null;
-    }
-
-    setScanning(false);
-    pushLog('Scan stopped.');
+    setAutomationEnabled(automationController.isEnabled());
+    pushLog('Monitoring started.');
   };
 
   if (showRemote) {
-    return <RemoteControlScreen onClose={() => setShowRemote(false)} />;
+    return (
+      <RemoteControlScreen
+        onClose={() => {
+          setShowRemote(false);
+          setAutomationEnabled(automationController.isEnabled());
+          setAutomationZone(automationController.getZone());
+        }}
+      />
+    );
   }
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <Text style={styles.title}>IR Home Bridge</Text>
-        <View
-          style={[
-            styles.statusDot,
-            scanning ? styles.statusDotOn : styles.statusDotOff,
-          ]}
-        />
+        <View>
+          <Text style={styles.title}>IR Home Bridge</Text>
+          <View style={styles.subtitleRow}>
+            <View
+              style={[
+                styles.statusDot,
+                scanning ? styles.statusDotOn : styles.statusDotOff,
+              ]}
+            />
+            <Text style={styles.subtitle}>
+              {scanning ? 'Monitoring' : 'Idle'}
+              {automationEnabled
+                ? ` · Automation on · ${zoneLabel(automationZone)}`
+                : ''}
+            </Text>
+          </View>
+        </View>
       </View>
 
       <View style={styles.readingCard}>
         <View style={styles.readingItem}>
           <Text style={styles.readingLabel}>Temperature</Text>
-          <Text style={styles.readingValue}>
-            {lastTemp !== undefined ? `${lastTemp}°C` : '—'}
+          <Text style={[styles.readingValue, { color: TEMP_ACCENT }]}>
+            {lastTemp !== undefined ? `${lastTemp}°` : '—'}
           </Text>
         </View>
         <View style={styles.readingDivider} />
         <View style={styles.readingItem}>
           <Text style={styles.readingLabel}>Humidity</Text>
-          <Text style={styles.readingValue}>
+          <Text style={[styles.readingValue, { color: HUMIDITY_ACCENT }]}>
             {lastHumidity !== undefined ? `${lastHumidity}%` : '—'}
           </Text>
         </View>
       </View>
 
-      {scanning && (
-        <Text style={styles.elapsed}>
-          Running for {formatElapsed(elapsedSeconds)}
+      <Pressable
+        style={[
+          styles.scanToggle,
+          scanning ? styles.scanToggleActive : styles.scanToggleIdle,
+        ]}
+        onPress={handleToggleScan}
+      >
+        <Text style={styles.scanToggleText}>
+          {scanning ? 'Stop monitoring' : 'Start monitoring'}
         </Text>
-      )}
+        {scanning && (
+          <Text style={styles.scanToggleSubtext}>
+            {formatElapsed(elapsedSeconds)}
+          </Text>
+        )}
+      </Pressable>
 
-      <View style={styles.buttonRow}>
+      <View style={styles.actionRow}>
         <Pressable
-          style={[
-            styles.button,
-            styles.buttonPrimary,
-            scanning && styles.buttonDisabled,
-          ]}
-          onPress={handleStart}
-          disabled={scanning}
+          style={styles.actionChip}
+          onPress={() => setHistoryVisible(true)}
         >
-          <Text style={styles.buttonText}>Start Scan</Text>
+          <Text style={styles.actionChipText}>Readings history</Text>
         </Pressable>
         <Pressable
-          style={[
-            styles.button,
-            styles.buttonSecondary,
-            !scanning && styles.buttonDisabled,
-          ]}
-          onPress={handleStop}
-          disabled={!scanning}
+          style={styles.actionChip}
+          onPress={() => setShowRemote(true)}
         >
-          <Text style={styles.buttonText}>Stop Scan</Text>
+          <Text style={styles.actionChipText}>AC remote</Text>
         </Pressable>
       </View>
 
-      <Pressable
-        style={styles.historyLink}
-        onPress={() => setHistoryVisible(true)}
-      >
-        <Text style={styles.historyLinkText}>View stored readings history</Text>
-      </Pressable>
-
-      <Pressable style={styles.historyLink} onPress={() => setShowRemote(true)}>
-        <Text style={styles.historyLinkText}>Open AC remote test</Text>
-      </Pressable>
-
-      <Text style={styles.logHeading}>Debug log</Text>
+      <Text style={styles.feedHeading}>Sensor feed</Text>
       <LogView lines={logLines} />
 
       <ReadingsHistoryModal
@@ -236,36 +274,43 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
     marginTop: 8,
-    marginBottom: 16,
+    marginBottom: 20,
   },
   title: {
     color: '#f2f4f7',
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: '700',
   },
+  subtitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+  },
   statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    marginLeft: 10,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
   },
   statusDotOn: {
-    backgroundColor: '#4caf6f',
+    backgroundColor: AUTOMATION_ACCENT,
   },
   statusDotOff: {
     backgroundColor: '#4d5361',
   },
+  subtitle: {
+    color: '#8a92a3',
+    fontSize: 13,
+  },
   readingCard: {
     flexDirection: 'row',
     backgroundColor: '#12151a',
-    borderRadius: 14,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: '#262b33',
-    paddingVertical: 18,
-    marginBottom: 10,
+    paddingVertical: 22,
+    marginBottom: 16,
   },
   readingItem: {
     flex: 1,
@@ -277,60 +322,59 @@ const styles = StyleSheet.create({
   },
   readingLabel: {
     color: '#8a92a3',
-    fontSize: 12,
-    marginBottom: 6,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    fontSize: 13,
+    marginBottom: 8,
   },
   readingValue: {
-    color: '#f2f4f7',
-    fontSize: 28,
+    fontSize: 34,
     fontWeight: '700',
   },
-  elapsed: {
-    color: '#7d8494',
-    fontSize: 13,
-    textAlign: 'center',
-    marginBottom: 14,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 14,
-  },
-  button: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 10,
+  scanToggle: {
+    borderRadius: 14,
+    paddingVertical: 16,
     alignItems: 'center',
+    marginBottom: 12,
   },
-  buttonPrimary: {
+  scanToggleIdle: {
     backgroundColor: '#3d6bff',
   },
-  buttonSecondary: {
-    backgroundColor: '#2a2f38',
+  scanToggleActive: {
+    backgroundColor: '#1c2129',
+    borderWidth: 1,
+    borderColor: '#333a46',
   },
-  buttonDisabled: {
-    opacity: 0.4,
-  },
-  buttonText: {
+  scanToggleText: {
     color: '#ffffff',
     fontWeight: '600',
-    fontSize: 14,
+    fontSize: 15,
   },
-  historyLink: {
-    marginBottom: 16,
-  },
-  historyLinkText: {
-    color: '#8ab4ff',
-    fontSize: 13,
-    textAlign: 'center',
-  },
-  logHeading: {
+  scanToggleSubtext: {
     color: '#8a92a3',
     fontSize: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    marginTop: 4,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 24,
+  },
+  actionChip: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+    backgroundColor: '#12151a',
+    borderWidth: 1,
+    borderColor: '#262b33',
+  },
+  actionChipText: {
+    color: '#c7cdd8',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  feedHeading: {
+    color: '#8a92a3',
+    fontSize: 13,
     marginBottom: 8,
   },
 });
